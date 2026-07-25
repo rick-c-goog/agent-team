@@ -243,6 +243,103 @@ def test_channel_error_hint_names_channel_id_not_group_chat_id():
     assert "administrator of the channel" in str(e.value)
 
 
+def test_mentioning_an_unknown_agent_answers_instead_of_going_silent():
+    """Regression: '@Quinn ...' against a workspace without Quinn produced total
+    silence — no reply, no log, no task. The user cannot tell it from a dead bot."""
+    app = App(human_ids={"11111111"})           # default agents: Cole, Penn, Ray
+    assert "Quinn" not in app.registry.names()
+
+    app.gateway.handle_message(
+        Update(text="@Quinn is there a momentum edge on SPY?", user_id="11111111",
+               user_handle="rick", topic="# research", mentions=["Quinn"])
+    )
+    reply = " ".join(app.client.transcript)
+    assert "don't have an agent called" in reply and "@Quinn" in reply
+    assert "@Cole" in reply and "@Penn" in reply     # tells you who *does* exist
+    app.close()
+
+
+def test_empty_workspace_says_agents_dir_is_the_problem(tmp_path):
+    empty = tmp_path / "agents"
+    empty.mkdir()
+    app = App(human_ids={"11111111"}, agents_dir=str(empty))
+
+    app.gateway.handle_message(
+        Update(text="@Quinn do some research", user_id="11111111", user_handle="rick",
+               topic="# research", mentions=["Quinn"])
+    )
+    reply = " ".join(app.client.transcript)
+    assert "No agents are loaded" in reply and "agents_dir" in reply
+    app.close()
+
+
+def test_known_agent_still_starts_a_task_and_does_not_get_a_complaint():
+    app = App(human_ids={"11111111"})
+    app.gateway.handle_message(
+        Update(text="@Cole write the launch post", user_id="11111111", user_handle="rick",
+               topic="# content", as_task=True, mentions=["Cole"])
+    )
+    reply = " ".join(app.client.transcript)
+    assert "don't have an agent" not in reply
+    assert "In Review" in reply                  # the loop actually ran
+    app.close()
+
+
+def test_ordinary_chatter_is_not_answered():
+    app = App(human_ids={"11111111"})
+    for text in ("good morning everyone", "we should look at SPY", "thanks @rick"):
+        app.gateway.handle_message(
+            Update(text=text, user_id="11111111", user_handle="rick", topic="# content")
+        )
+    assert not app.client.transcript, "the bot must not chime in on normal conversation"
+    app.close()
+
+
+def test_bot_does_not_complain_when_addressed_itself():
+    app = App(human_ids={"11111111"})
+    app.gateway.bot_username = "MyTeam_TeleRaft_Bot"
+    app.gateway.handle_message(
+        Update(text="@MyTeam_TeleRaft_Bot status?", user_id="11111111",
+               user_handle="rick", topic="# content")
+    )
+    assert not app.client.transcript
+    app.close()
+
+
+def test_agents_command_lists_the_team():
+    app = App(human_ids={"11111111"})
+    names = app.gateway.handle_message(
+        Update(text="/agents", user_id="11111111", user_handle="rick", topic="# content")
+    )
+    assert set(names) == {"Cole", "Penn", "Ray"}
+    listing = " ".join(app.client.transcript)
+    assert "@Cole" in listing and "owns:" in listing and "/task" in listing
+    app.close()
+
+
+def test_runner_reads_agents_live_rather_than_caching_them():
+    """Agents registered after startup must be mentionable without a restart."""
+    from teleraft.agents.registry import AgentConfig
+
+    app, runner = _runner()
+    assert "Quinn" not in runner.agent_names
+    app.registry.register(AgentConfig(name="Quinn", soul_md="factor researcher", goals={}))
+    assert "Quinn" in runner.agent_names
+    app.close()
+
+
+def test_message_from_the_wrong_chat_is_logged_not_swallowed(caplog):
+    app, runner = _runner()
+    with caplog.at_level("WARNING"):
+        assert runner.normalize_message({
+            "chat": {"id": "-999"},
+            "from": {"id": 1, "username": "rick", "is_bot": False},
+            "text": "hello",
+        }) is None
+    assert "group_chat_id" in caplog.text
+    app.close()
+
+
 def test_normalize_callback():
     app, runner = _runner()
     cb = runner.normalize_callback({"data": "approve|run1|review", "from": {"id": 11111111}})

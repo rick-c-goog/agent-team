@@ -486,8 +486,10 @@ Also read from the environment: `ANTHROPIC_API_KEY` (when `runtime_engine=claude
 | Symptom | Cause / fix |
 |---|---|
 | `Bad Request: chat not found` on send | The chat id being sent is not one the bot can post to. The error now prints the offending `chat_id` and what to check: `group_chat_id` must be the numeric supergroup id (`-100…`, from `getUpdates` §6.2), and the bot must be in that group. Startup preflight catches this before polling. |
+| **`@Name …` does nothing at all** | Two causes, and the bot now tells you which. If it replies *"I don't have an agent called @Name"*, your `agents_dir` is wrong — a quant desk needs `agents_dir = "agents/quant"`, not the default. If it stays completely silent, the bot never received the message: **privacy mode is still on** (§3.2) — disable it, then **remove and re-add** the bot. Run `/agents` to see who is actually loaded; the startup log lists them too. |
 | Bot ignores messages in the group | Privacy mode still **on** (§3.2), or the bot isn't in the group. Disable privacy, then **remove and re-add** the bot so it takes effect. |
-| `@Cole` doesn't start a task | Agent name/username not in `agent_usernames`, or the agent YAML isn't loaded. The runner also matches a bare `@Cole` to a display name — check spelling/case. |
+| Startup logs `agents loaded (0): NONE` | `agents_dir` points at a directory with no `*.yaml`. Every @mention will fail and every task stays unclaimed. |
+| Startup logs `ignoring message from chat …` | Messages are arriving from a different chat than `group_chat_id`. Copy the id from that log line if it is your workspace group. |
 | Tasks land in the wrong topic / all in *general* | `topic_threads` ids don't match reality. Re-read `message_thread_id` from `getUpdates` (§6.2). |
 | `missing required config for a live run` on start | `workspace_bot_token` or `group_chat_id` unset. Check env vars and `teleraft.toml`. |
 | `human_ids is empty` on start | Add your numeric id (`@userinfobot`) to `human_ids`. Without it nobody can approve. |
@@ -685,6 +687,7 @@ is tombstoned.
 
 | Command | Effect |
 |---|---|
+| `/agents` (or `/help`) | Who is on the team, what each owns, and what escalates — **check this first if an @mention seems to do nothing** |
 | `/kb add <uri> [--team]` | Register + ingest. Scoped to the agent owning the current topic. |
 | `/kb list` | Every source with status, doc and chunk counts, and any error |
 | `/kb sync [source_id]` | Re-sync one source, or all of the topic agent's sources |

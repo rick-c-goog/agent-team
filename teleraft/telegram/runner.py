@@ -30,7 +30,6 @@ class LiveRunner:
         self.group_chat_id = str(config.group_chat_id)
         self.thread_to_topic = config.thread_to_topic()
         self.username_to_agent = config.username_to_agent()
-        self.agent_names = set(gateway.registry.names())
         self._offset = 0
         # user_id → callback data of a pending Reject awaiting a reason reply
         self._pending_reject: dict[str, str] = {}
@@ -38,11 +37,23 @@ class LiveRunner:
     # ------------------------------------------------------------------ #
     # Normalizers (pure, testable)
     # ------------------------------------------------------------------ #
+    @property
+    def agent_names(self) -> set[str]:
+        """Read live from the registry — agents can be added while the runner is up."""
+        return set(self.gateway.registry.names())
+
     def normalize_message(self, msg: dict) -> Optional[Update]:
         frm = msg.get("from", {})
         if frm.get("is_bot"):
             return None
-        if str(msg.get("chat", {}).get("id")) != self.group_chat_id:
+        chat_id = str(msg.get("chat", {}).get("id"))
+        if chat_id != self.group_chat_id:
+            # Worth saying out loud: a mismatch here means every message is ignored.
+            log.warning(
+                "ignoring message from chat %s — configured group_chat_id is %s. "
+                "If this is your workspace group, fix group_chat_id.",
+                chat_id, self.group_chat_id,
+            )
             return None
         text = msg.get("text", "") or ""
         user_id = str(frm.get("id", ""))
@@ -101,6 +112,8 @@ class LiveRunner:
         update = self.normalize_message(msg)
         if update is None:
             return
+        log.info("message in %s from %s: %r (mentions=%s)",
+                 update.topic, update.user_handle, update.text[:80], update.mentions)
         try:
             self.gateway.handle_message(update)
         except Exception:  # keep the loop alive; one bad message shouldn't stop the bot
@@ -132,7 +145,15 @@ class LiveRunner:
     # ------------------------------------------------------------------ #
     def run_forever(self) -> None:  # pragma: no cover - requires live Telegram
         me = self.client.get_me()
-        log.info("TeleRaft runner online as @%s; polling…", me.get("username"))
+        self.gateway.bot_username = me.get("username", "")
+        agents = sorted(self.agent_names)
+        log.info("TeleRaft runner online as @%s", me.get("username"))
+        log.info("agents loaded (%d): %s", len(agents), ", ".join(agents) or "NONE")
+        if not agents:
+            log.warning("no agents loaded — check `agents_dir` in teleraft.toml; "
+                        "@mentions cannot resolve and every task will stay unclaimed")
+        log.info("topics mapped: %s", self.thread_to_topic or "none (all → 'general')")
+        log.info("polling…")
         while True:
             try:
                 updates = self.client.get_updates(self._offset, self.config.poll_timeout)

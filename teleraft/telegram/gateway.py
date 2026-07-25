@@ -76,6 +76,7 @@ class Gateway:
         self.engine = None       # wired after construction (engine needs our notify hook)
         self.knowledge = None    # optional KnowledgeService for /kb commands
         self.hypotheses = None   # optional HypothesisRegistry for /hyp commands
+        self.bot_username = ""   # set by the runner after getMe, to avoid self-replies
 
     def attach_engine(self, engine) -> None:
         self.engine = engine
@@ -96,11 +97,20 @@ class Gateway:
         if u.text.strip().startswith("/hyp"):
             return self.handle_hyp_command(u)
 
+        if u.text.strip().startswith(("/agents", "/help")):
+            return self.handle_help_command(u)
+
         agent_names = set(self.registry.names())
         mentioned_agents = [m for m in u.mentions if m in agent_names]
 
         is_task = u.as_task or u.text.strip().startswith("/task") or bool(mentioned_agents)
         if not is_task:
+            # A message that clearly addresses someone (`@Name …`) but names no known
+            # agent used to vanish in silence — the single most confusing failure mode
+            # in a live workspace. Answer it instead.
+            unresolved = self._unresolved_mention(u, agent_names)
+            if unresolved:
+                self._report_unknown_agent(u, unresolved, agent_names)
             return None  # ordinary chatter; nothing to orchestrate
 
         title = _strip_command(u.text)
@@ -112,6 +122,73 @@ class Gateway:
             # Agent auto-claims on @mention and the run starts (DESIGN.md §6).
             return self._run_task(task_id, owner)
         return task_id
+
+    # -- addressing an agent that does not exist --------------------------- #
+    def _unresolved_mention(self, u: Update, agent_names: set[str]) -> Optional[str]:
+        """The @handle a message opens with, when it names no known agent.
+
+        Only the *leading* mention counts: `@Someone do X` is unambiguously an attempt
+        to address someone, whereas an @handle mid-sentence is usually just talk.
+        """
+        first = u.text.strip().split()[:1]
+        if not first or not first[0].startswith("@"):
+            return None
+        handle = first[0][1:].strip(",:;!?").strip()
+        if not handle:
+            return None
+        lowered = {n.lower() for n in agent_names}
+        if handle.lower() in lowered:
+            return None
+        # Don't answer back when the workspace bot itself is addressed, or when the
+        # handle resolved to an agent through the username map.
+        if self.bot_username and handle.lower() == self.bot_username.lower():
+            return None
+        if any(m in agent_names for m in u.mentions):
+            return None
+        return handle
+
+    def _report_unknown_agent(self, u: Update, handle: str, agent_names: set[str]) -> None:
+        known = ", ".join(f"@{n}" for n in sorted(agent_names)) or "(none loaded)"
+        text = (
+            f"🤷 I don't have an agent called `@{handle}`.\n"
+            f"Agents in this workspace: {known}\n"
+            f"Use `/agents` for details, or `/task <what to do>` to open unclaimed work."
+        )
+        if not agent_names:
+            text += ("\n⚠️ No agents are loaded at all — check `agents_dir` in "
+                     "teleraft.toml (a quant desk needs `agents/quant`).")
+        self.client.send_message(self.group_chat_id, text, thread=u.topic)
+
+    # -- /agents · /help --------------------------------------------------- #
+    def handle_help_command(self, u: Update):
+        """Show who is on the team and what they own — the first thing to check when
+        an @mention seems to do nothing."""
+        names = self.registry.names()
+        if not names:
+            self.client.send_message(
+                self.group_chat_id,
+                "⚠️ No agents are loaded. Check `agents_dir` in teleraft.toml — "
+                "e.g. `agents/quant` for a quant desk.",
+                thread=u.topic,
+            )
+            return []
+
+        lines = ["🤖 *Agents in this workspace*"]
+        for name in sorted(names):
+            goals = self.registry.goals(name) or {}
+            owns = ", ".join(goals.get("owns", [])) or "—"
+            role = self.registry.role(name)
+            lines.append(f"  *@{name}* ({role}) — owns: {owns}")
+            escalate = goals.get("escalate_when", [])
+            if escalate:
+                lines.append(f"      escalates on: {', '.join(escalate)}")
+        lines += [
+            "",
+            "*Commands*: `/task <what to do>` · `/agents` · `/kb list` · `/hyp list`",
+            "Address an agent directly: `@Name <what to do>`",
+        ]
+        self.client.send_message(self.group_chat_id, "\n".join(lines), thread=u.topic)
+        return names
 
     # -- /kb — knowledge base management (DESIGN.md §4.1.4) ---------------- #
     def handle_kb_command(self, u: Update):

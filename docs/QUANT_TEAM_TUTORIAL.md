@@ -324,6 +324,16 @@ db_path = "teleraft_data/quant.db"
 python -m teleraft.main
 ```
 
+Check the startup log names the quant desk — this is the single most common live
+misconfiguration:
+
+```
+INFO agents loaded (4): Bailey, Mac, Quinn, Robin
+```
+
+If it lists `Cole, Penn, Ray` instead, `agents_dir` is still the default and `@Quinn`
+will not resolve. `/agents` in the group shows the same thing.
+
 In the `# research` topic:
 
 ```
