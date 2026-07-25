@@ -1,0 +1,31 @@
+[project]
+name = "teleraft"
+version = "0.1.0"
+description = "TeleRaft — a multi-agent team workspace on Telegram, orchestrated with the Anthropic Planner/Orchestrator/Builder/Tester loop as a checkpointed state graph."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+# Real runtimes / live Telegram are optional; the system runs fully offline with mocks.
+anthropic = ["anthropic>=0.40"]
+telegram = ["httpx>=0.27"]          # also required by web/Drive knowledge fetchers
+knowledge = ["pypdf>=4.0"]          # .pdf extraction with page-number citations
+dev = ["pytest>=8.0", "httpx>=0.27", "pypdf>=4.0"]
+
+[project.scripts]
+teleraft-demo = "teleraft.demo:main"
+teleraft-onboard = "teleraft.onboarding_demo:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["teleraft*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

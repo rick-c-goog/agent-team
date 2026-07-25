@@ -1,0 +1,71 @@
+# TeleRaft live configuration — copy to teleraft.toml and fill in.
+# Secrets (tokens) are better supplied via environment variables; see the [env] notes
+# at the bottom. Anything set in the environment overrides this file.
+
+[telegram]
+# Workspace bot token from @BotFather (the always-present bot: cards, board, broadcast).
+workspace_bot_token = "123456:ABC-DEF_your_workspace_bot_token"
+
+# The supergroup id (a large negative number, e.g. -1001234567890).
+# Get it by adding @RawDataBot to the group, or from getUpdates (see docs §5).
+group_chat_id = "-1001234567890"
+
+# Broadcast channel for the activity feed / daily digest. Channel id ("-100…") or "@handle".
+channel_id = "@your_teleraft_feed"
+
+# Numeric Telegram user ids allowed to approve/reject gates (humans only).
+# Find yours by messaging @userinfobot.
+human_ids = ["11111111"]
+
+# Forum topics ↔ their message_thread_id. Create the topics in the group first,
+# then read each topic's thread id from getUpdates (docs §5). The label on the left
+# must match the topic names your agents own (see agents/*.yaml).
+[telegram.topic_threads]
+"# content"  = "2"
+"# delivery" = "3"
+"# finance"  = "4"
+"# admin"    = "5"
+
+# Agent display name → its bot @username, for @mention routing.
+[telegram.agent_usernames]
+Cole = "@Cole_TR_Bot"
+Ray  = "@Ray_TR_Bot"
+Penn = "@Penn_TR_Bot"
+
+# Only needed for the full one-bot-per-agent topology (agents post as themselves).
+# [telegram.agent_bot_tokens]
+# Cole = "222:..."
+# Ray  = "333:..."
+# Penn = "444:..."
+
+[app]
+agents_dir = "agents"
+db_path = "teleraft_data/teleraft.db"
+runtime_engine = "mock"     # "mock" (offline, no keys) or "claude" (needs ANTHROPIC_API_KEY)
+model = "claude-fable-5"
+
+# --- Knowledge base / RAG (DESIGN.md §4.1) ---
+[knowledge]
+# Allow-listed root for `file:` sources — agents cannot read outside it.
+root = "."
+sync_on_start = true
+
+# --- Onboarding entry point (DESIGN.md §3.3) ---
+# The host that carries the onboarding interview and fires agent heartbeats.
+[onboarding]
+host = "hermes"             # "hermes" (default, best scheduler) | "openclaw" | "mock"
+# gateway_url = "http://127.0.0.1:8787"   # Hermes daemon; OpenClaw defaults to :3000
+# api_key = ""                            # prefer the env var below
+
+# --- Environment overrides (recommended for secrets) ---
+#   export TELERAFT_BOT_TOKEN=123456:ABC...
+#   export TELERAFT_GROUP_CHAT_ID=-1001234567890
+#   export TELERAFT_CHANNEL_ID=@your_teleraft_feed
+#   export TELERAFT_HUMAN_IDS="11111111 22222222"
+#   export TELERAFT_RUNTIME=claude
+#   export ANTHROPIC_API_KEY=sk-ant-...
+#   export TELERAFT_KNOWLEDGE_ROOT=/srv/teleraft/kb
+#   export TELERAFT_ONBOARDING_HOST=hermes
+#   export TELERAFT_HOST_GATEWAY_URL=http://127.0.0.1:8787
+#   export TELERAFT_HOST_API_KEY=...                 # Hermes / OpenClaw gateway key
+#   export GOOGLE_DRIVE_ACCESS_TOKEN=ya29...         # read-only scope, for gdrive sources

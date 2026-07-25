@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+*.db
+*.sqlite3
+teleraft_data/
+teleraft.toml
+.DS_Store

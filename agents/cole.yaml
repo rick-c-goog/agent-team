@@ -1,0 +1,22 @@
+name: Cole
+role: member
+soul: souls/cole.md
+goals:
+  owns: ["content pipeline", "# content"]
+  escalate_when:
+    - "pricing"
+    - "legal"
+    - "medical claim"
+knowledge:                       # §4.1 — curated, read-only corpus, cited in output
+  - type: file
+    uri: kb/cole/brand-voice.md
+  - type: file
+    uri: kb/shared/personas.csv
+    scope: team
+heartbeat:
+  - cron: "0 9 * * 1-5"
+    prompt: "Review the # content backlog; claim the highest-priority unclaimed task."
+runtime:
+  engine: mock
+  computer: vm-01
+  model: claude-fable-5

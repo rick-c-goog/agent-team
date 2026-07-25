@@ -1,0 +1,15 @@
+name: Penn
+role: admin
+soul: souls/penn.md
+goals:
+  owns: ["finance", "# finance"]
+  escalate_when:
+    - "wire transfer"
+    - "tax"
+heartbeat:
+  - cron: "0 8 * * 1"
+    prompt: "Check for invoices due this week and draft reminders."
+runtime:
+  engine: mock
+  computer: vm-01
+  model: claude-fable-5

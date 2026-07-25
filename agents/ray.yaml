@@ -1,0 +1,13 @@
+name: Ray
+role: member
+soul: souls/ray.md
+goals:
+  owns: ["service delivery", "# delivery"]
+  escalate_when:
+    - "refund"
+    - "legal"
+heartbeat: []
+runtime:
+  engine: mock
+  computer: vm-01
+  model: claude-fable-5
