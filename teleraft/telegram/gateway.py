@@ -435,6 +435,20 @@ class Gateway:
         self.client.send_message(self.group_chat_id, text, buttons=buttons, thread=self._thread(task))
         self.client.send_channel(f"👀 Review needed: #{task['id']} {task['title']}")
 
+    def _notify_failed(self, run_id, task_id, node, agent, error):
+        """A run crashed. Say so in the thread — silence looks like a hung task."""
+        task = self.storage.get_task(task_id)
+        first_line = str(error).splitlines()[0] if error else "unknown error"
+        detail = "\n".join(str(error).splitlines()[1:6])
+        text = (f"❌ *Run failed* at the `{node}` step ({agent}).\n"
+                f"{first_line}")
+        if detail:
+            text += f"\n```\n{detail}\n```"
+        text += "\nThe task is back to *Todo* — fix the cause and re-run it."
+        self.client.send_message(self.group_chat_id, text, thread=self._thread(task))
+        self.client.send_channel(f"❌ Run failed on #{task_id} at {node}: {first_line}")
+        self._refresh_task_card(task_id)
+
     def _notify_escalate(self, run_id, task_id, reason):
         task = self.storage.get_task(task_id)
         self.client.send_message(self.group_chat_id, f"🚨 Escalation: {reason}",

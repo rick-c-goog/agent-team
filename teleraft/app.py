@@ -42,7 +42,12 @@ class App:
         knowledge_root: str = DEFAULT_KNOWLEDGE_ROOT,
         sync_knowledge: bool = True,
         group_chat_id: str = "",
+        default_engine: str = "mock",
+        model: str = "",
     ):
+        # Engine for agents that declare none of their own.
+        self.default_engine = (default_engine or "mock").strip().lower()
+        self.model = model
         self.storage = Storage(db_path)
         self.registry = Registry(self.storage)
         agent_configs = load_agents_from_dir(agents_dir)
@@ -95,18 +100,45 @@ class App:
     def _default_runtime_for(self, agent_configs):
         """Map each agent to a runtime by its declared `runtime.engine`.
 
-        A workspace can mix engines: prose agents on the mock/Claude runtime and quant
-        agents on the backtest-driven QuantRuntime, all in the same channels and the
-        same loop (DESIGN.md §4 runtime model).
+        A workspace can mix engines: prose agents on Claude, quant agents on the
+        deterministic backtest runtime, all in the same channels and the same loop
+        (DESIGN.md §4 runtime model). An agent that declares no engine falls back to
+        `default_engine`.
+
+        Engines are built lazily and shared, so a workspace with no Claude agents never
+        constructs an Anthropic client and never needs an API key.
         """
-        shared_mock = MockRuntime()
-        shared_quant = QuantRuntime(self.hypotheses)
-        engines = {cfg.name: cfg.runtime_engine for cfg in agent_configs}
+        engines = {
+            cfg.name: (cfg.runtime_engine or "").strip().lower()
+            for cfg in agent_configs
+        }
+        cache: dict[str, Runtime] = {}
+
+        def build(engine: str) -> Runtime:
+            if engine in cache:
+                return cache[engine]
+            if engine == "quant":
+                runtime: Runtime = QuantRuntime(self.hypotheses)
+            elif engine in ("claude", "claude-agent-sdk", "anthropic"):
+                from .runtime.anthropic_runtime import AnthropicRuntime
+                runtime = AnthropicRuntime(model=self.model) if self.model \
+                    else AnthropicRuntime()
+            else:
+                runtime = MockRuntime()
+            cache[engine] = runtime
+            return runtime
 
         def pick(agent: str) -> Runtime:
-            return shared_quant if engines.get(agent) == "quant" else shared_mock
+            return build(engines.get(agent) or self.default_engine)
 
         return pick
+
+    def engines_in_use(self, agent_configs) -> dict[str, str]:
+        """agent → resolved engine name, for startup logging and preflight."""
+        return {
+            cfg.name: (cfg.runtime_engine or "").strip().lower() or self.default_engine
+            for cfg in agent_configs
+        }
 
     def register_agent_knowledge(self, agent_configs, sync: bool = True) -> list:
         """Register `knowledge:` entries from agent YAML; returns sync reports (§4.1)."""

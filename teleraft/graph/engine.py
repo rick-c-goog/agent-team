@@ -73,6 +73,7 @@ class EngineResult:
     run_id: str
     status: RunStatus
     interrupt: Optional[Interrupt] = None
+    error: str = ""
 
 
 class GraphEngine:
@@ -145,7 +146,7 @@ class GraphEngine:
             executed = node
             try:
                 node = self._exec_node(executed, run_id, state)
-            except Interrupt as intr:
+            except Interrupt as intr:  # noqa: PERF203 - control flow, not an error
                 state.status = RunStatus.AWAITING_HUMAN
                 state.pending_gate = intr.gate
                 self.storage.checkpoint(run_id, state)
@@ -153,6 +154,20 @@ class GraphEngine:
                 self.storage.add_run_event(run_id, seq, f"{executed}→gate:{intr.gate.value}",
                                            "suspended for human")
                 return EngineResult(run_id, RunStatus.AWAITING_HUMAN, interrupt=intr)
+            except Exception as e:
+                # A node blew up (bad credential, provider down, a bug). Record it,
+                # surface it in Telegram, and leave the task visibly failed — a run
+                # that dies only in the server log looks identical to a hung one.
+                state.status = RunStatus.FAILED
+                self.storage.checkpoint(run_id, state)
+                seq += 1
+                self.storage.add_run_event(run_id, seq, f"{executed}→failed", str(e)[:500])
+                self.storage.finish_run(run_id, state)
+                self.storage.update_task(state.task_id, status=TaskStatus.TODO.value,
+                                         owner=None)
+                self.notify("failed", run_id=run_id, task_id=state.task_id,
+                            node=executed, agent=state.agent, error=str(e))
+                return EngineResult(run_id, RunStatus.FAILED, error=str(e))
 
             seq += 1
             self.storage.add_run_event(run_id, seq, executed, self._event_detail(state))

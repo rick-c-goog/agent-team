@@ -21,6 +21,30 @@ from .base import RoleRequest
 DEFAULT_MODEL = "claude-fable-5"
 
 
+def _explain_api_error(exc: Exception) -> str:
+    """Name the fix for the Anthropic errors that actually happen in deployment."""
+    name = type(exc).__name__
+    text = str(exc)
+    if "authentication" in text.lower() or "invalid x-api-key" in text.lower() \
+            or name == "AuthenticationError":
+        return (
+            "Anthropic rejected the API key (401 invalid x-api-key).\n"
+            "  → Check ANTHROPIC_API_KEY is set to a current key for this account.\n"
+            "  → Note the key must be exported in the *same* environment that runs\n"
+            "    TeleRaft — a key in another venv or shell will not be picked up.\n"
+            "  → Agents that don't need a model can use `engine: quant` (deterministic\n"
+            "    backtests, no key) or `engine: mock` — see QUANT_TEAM_TUTORIAL.md §10."
+        )
+    if name == "RateLimitError" or "rate limit" in text.lower():
+        return f"Anthropic rate limit hit: {text}\n  → retry, or lower the run budget."
+    if name in ("NotFoundError",) or "model" in text.lower() and "not found" in text.lower():
+        return (f"Anthropic rejected the model: {text}\n"
+                "  → check `model` in teleraft.toml / TELERAFT_MODEL.")
+    if name in ("APIConnectionError", "APITimeoutError"):
+        return f"Could not reach the Anthropic API: {text}\n  → check network/proxy."
+    return f"Anthropic call failed ({name}): {text}"
+
+
 def _extract_json(text: str) -> dict[str, Any]:
     """Pull the first JSON object out of a model response (tolerates prose around it)."""
     start = text.find("{")
@@ -78,12 +102,15 @@ class AnthropicRuntime:
         )
 
     def _call(self, system: str, user: str, max_tokens: int = 1500) -> tuple[dict, int]:
-        msg = self._client.messages.create(
-            model=self.model,
-            max_tokens=max_tokens,
-            system=system,
-            messages=[{"role": "user", "content": user}],
-        )
+        try:
+            msg = self._client.messages.create(
+                model=self.model,
+                max_tokens=max_tokens,
+                system=system,
+                messages=[{"role": "user", "content": user}],
+            )
+        except Exception as e:
+            raise RuntimeError(_explain_api_error(e)) from e
         text = "".join(getattr(b, "text", "") for b in msg.content)
         tokens = msg.usage.input_tokens + msg.usage.output_tokens
         return _extract_json(text), tokens

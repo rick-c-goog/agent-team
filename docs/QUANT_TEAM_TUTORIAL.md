@@ -620,7 +620,36 @@ returns that never existed — the single most common way a backtest lies to you
 assert on exact Sharpe ratios. That is a feature for the numeric roles and a limitation
 for the narrative ones.
 
-The productive split is **Claude for prose, the backtester for verdicts**:
+> **The quant desk needs no API key.** Every agent in [`agents/quant/`](../agents/quant/)
+> declares `engine: quant`, and each agent's own declaration wins over the global
+> `runtime_engine` in `teleraft.toml`. So you can run the whole desk — hypotheses,
+> backtests, out-of-sample verification — with no credentials at all. The startup log
+> confirms the routing:
+>
+> ```
+> INFO agent Quinn → quant runtime
+> INFO agent Bailey → quant runtime
+> ```
+>
+> If a line says `→ claude runtime`, that agent declares no engine (or declares Claude)
+> and will need `ANTHROPIC_API_KEY`. Startup checks the key only for agents that
+> actually need one, and fails fast naming them.
+
+The productive split is **Claude for prose, the backtester for verdicts**, set per agent
+in YAML:
+
+```yaml
+# agents/quant/quinn.yaml — narrative role, wants a model
+runtime:
+  engine: claude
+```
+```yaml
+# agents/quant/bailey.yaml — verdict role, must stay numeric
+runtime:
+  engine: quant
+```
+
+or in code:
 
 ```python
 from teleraft.runtime.anthropic_runtime import AnthropicRuntime
@@ -775,6 +804,8 @@ signature — and you would rather add data providers than remove execution path
 | Run escalates with "families exhausted" | A negative result, not a bug. No family in the grid found an out-of-sample edge; add a family or change the universe. |
 | A live-trading question stalls at a gate | Also working as intended: `escalate_when` fires before any step runs (§4). |
 | Backtest looks too good | Check turnover and costs. Raise `commission`, and read the note's `📚 Sources` line — every number should trace to a backtest artifact. |
+| `401 invalid x-api-key` during a run | An agent is routed to Claude. The quant desk needs no key — check the startup log for `agent X → claude runtime`, then either set `ANTHROPIC_API_KEY` in **the same environment that runs TeleRaft**, or give that agent `engine: quant` (§10). |
+| `❌ Run failed at the <node> step` in the thread | A node raised. The message carries the cause, and the task returns to *Todo* so you can re-run it once the cause is fixed. |
 | `CurrencyMismatch: portfolio spans [...]` | Working as intended (§8.4). Supply `base_currency` + `fx_rates`, or keep the universe to one currency. |
 | Crypto Sharpe looks different than before | It is now annualised with 365 rather than 252 (§8.1). The old number was wrong by ~20%. |
 | A-share strategy never shorts | Correct: `CN.allows_short = False`, enforced in `backtest()`. Retail A-share shorting is effectively unavailable. |

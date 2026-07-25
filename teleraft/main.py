@@ -8,6 +8,7 @@ resumes in-flight runs from their last checkpoint.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 from .app import App
@@ -16,14 +17,29 @@ from .telegram.live_client import LiveTelegramClient
 from .telegram.runner import LiveRunner
 
 
-def build_runtime_factory(cfg):
-    if cfg.runtime_engine == "claude":
-        from .runtime.anthropic_runtime import AnthropicRuntime
-        rt = AnthropicRuntime(model=cfg.model)
-        return lambda agent: rt
-    from .runtime.mock import MockRuntime
-    rt = MockRuntime()
-    return lambda agent: rt
+CLAUDE_ENGINES = {"claude", "claude-agent-sdk", "anthropic"}
+
+
+def check_engine_prerequisites(engines: dict[str, str]) -> list[str]:
+    """Fail fast on engines that cannot possibly run, before any task is claimed.
+
+    Only checks what is actually used: a desk whose agents all declare `engine: quant`
+    is fully deterministic and needs no API key at all.
+    """
+    problems: list[str] = []
+    claude_agents = sorted(a for a, e in engines.items() if e in CLAUDE_ENGINES)
+    if claude_agents and not os.environ.get("ANTHROPIC_API_KEY"):
+        problems.append(
+            f"agents {', '.join(claude_agents)} use the Claude engine but "
+            "ANTHROPIC_API_KEY is not set. Export a valid key, or set "
+            "`engine: quant` (deterministic, no key) / `engine: mock` in their "
+            "agent YAML — see docs/QUANT_TEAM_TUTORIAL.md §10."
+        )
+    unknown = {e for e in engines.values()} - CLAUDE_ENGINES - {"quant", "mock"}
+    if unknown:
+        problems.append(f"unknown runtime engine(s) {sorted(unknown)} — "
+                        "valid: quant, claude, mock")
+    return problems
 
 
 def main() -> None:
@@ -54,16 +70,30 @@ def main() -> None:
         )
     if report.warnings:
         logging.warning("starting with reduced functionality (see warnings above)")
+    # No `runtime_for` override: each agent's own `runtime.engine` decides, with
+    # cfg.runtime_engine as the fallback for agents that declare none. Overriding it
+    # here would route a deterministic quant desk through Claude.
     app = App(
         db_path=cfg.db_path,
         agents_dir=cfg.agents_dir,
         human_ids=cfg.human_ids,
         client=client,
-        runtime_for=build_runtime_factory(cfg),
         knowledge_root=cfg.knowledge_root,
         sync_knowledge=cfg.sync_knowledge_on_start,
         group_chat_id=cfg.group_chat_id,
+        default_engine=cfg.runtime_engine,
+        model=cfg.model,
     )
+
+    from .agents.registry import load_agents_from_dir
+    engines = app.engines_in_use(load_agents_from_dir(cfg.agents_dir))
+    for agent, engine in sorted(engines.items()):
+        logging.info("agent %s → %s runtime", agent, engine)
+    engine_problems = check_engine_prerequisites(engines)
+    if engine_problems:
+        for problem in engine_problems:
+            logging.error("preflight: %s", problem)
+        raise SystemExit("Runtime configuration is not usable — fix the above and restart.")
     for report in app.knowledge.health():
         if report["status"] == "error":
             logging.warning("knowledge source %s (%s) is unhealthy: %s",
