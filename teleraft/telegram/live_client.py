@@ -16,16 +16,55 @@ Requires ``pip install teleraft[telegram]`` (httpx).
 
 from __future__ import annotations
 
+import logging
+import re
+from dataclasses import dataclass
 from typing import Optional
+
+log = logging.getLogger("teleraft.telegram")
 
 from .client import Button
 
 
-def _explain(method: str, params: dict, data: dict) -> str:
+# Telegram usernames: 5–32 chars, must start with a letter, then letters/digits/
+# underscores only. Hyphens and dots are NOT allowed — a handle containing them can
+# never resolve, so we can say so without asking Telegram.
+_USERNAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{4,31}$")
+
+
+def chat_ref_problem(ref: str) -> Optional[str]:
+    """Structural problem with a chat reference, or None if it *could* resolve.
+
+    Catches the misconfiguration class that no permission change can fix.
+    """
+    ref = (ref or "").strip()
+    if not ref:
+        return "is empty"
+    if ref.lstrip("-").isdigit():
+        return None                                  # numeric id: plausible
+    if not ref.startswith("@"):
+        return (f"{ref!r} is neither a numeric chat id (-100…) nor an @handle, "
+                "so it can never resolve")
+    handle = ref[1:]
+    if not _USERNAME_RE.match(handle):
+        bad = sorted({c for c in handle if not (c.isalnum() or c == "_")})
+        detail = (f"contains {', '.join(repr(c) for c in bad)}" if bad
+                  else f"is {len(handle)} characters")
+        return (
+            f"{ref!r} is not a valid Telegram username — it {detail}. "
+            "Usernames are 5–32 characters, start with a letter, and may contain only "
+            "letters, digits and underscores (no hyphens or dots). "
+            "Private channels have no @handle at all: use the numeric -100… id."
+        )
+    return None
+
+
+def _explain(method: str, params: dict, data: dict, hint_key: str = "") -> str:
     """Turn a terse Bot API error into one that names the likely misconfiguration.
 
     `chat not found` in particular is almost never a Telegram problem — it means the
-    chat id being sent is not the one the bot belongs to.
+    chat id being sent is not the one the bot belongs to. `hint_key` names the config
+    key that supplied the id, so the advice points at the right setting.
     """
     description = str(data.get("description", ""))
     base = f"Telegram API {method} failed: {data}"
@@ -33,18 +72,25 @@ def _explain(method: str, params: dict, data: dict) -> str:
 
     if "chat not found" in lowered:
         chat_id = params.get("chat_id")
-        hint = (
-            f"\n  → chat_id={chat_id!r} is not a chat this bot can post to. Check:\n"
-            "    1. `group_chat_id` in teleraft.toml / TELERAFT_GROUP_CHAT_ID is the\n"
-            "       supergroup id (a large negative number like -1001234567890),\n"
-            "       not a name — read it from getUpdates (TELEGRAM_SETUP.md §6.2).\n"
-            "    2. The bot has been added to that group.\n"
-            "    3. For a channel, the bot is an admin with Post Messages rights."
-        )
-        if isinstance(chat_id, str) and not chat_id.lstrip("-").isdigit() \
-                and not chat_id.startswith("@"):
-            hint += (f"\n    Note: {chat_id!r} is neither a numeric id nor an @handle, "
-                     "so it can never resolve.")
+        structural = chat_ref_problem(str(chat_id or ""))
+        hint = f"\n  → chat_id={chat_id!r} is not a chat this bot can post to."
+        if structural:
+            hint += f"\n    {structural}"
+            return base + hint
+        if hint_key == "channel_id":
+            hint += (
+                "\n    It came from `channel_id`. Check:\n"
+                "    1. For a public channel, the @handle matches its t.me/<handle>.\n"
+                "    2. For a private channel, use the numeric -100… id instead.\n"
+                "    3. The bot is an administrator of the channel with Post Messages."
+            )
+        else:
+            hint += (
+                "\n    It came from `group_chat_id`. Check:\n"
+                "    1. It is the numeric supergroup id (-100…), read from getUpdates\n"
+                "       (TELEGRAM_SETUP.md §6.2).\n"
+                "    2. The bot has been added to that group."
+            )
         return base + hint
 
     if "not enough rights" in lowered or "have no rights" in lowered:
@@ -57,6 +103,22 @@ def _explain(method: str, params: dict, data: dict) -> str:
         return base + ("\n  → the bot token is wrong or has been revoked. "
                        "Reissue it in BotFather and update TELERAFT_BOT_TOKEN.")
     return base
+
+
+@dataclass
+class PreflightReport:
+    """Startup validation split by severity: fatal blocks, warnings degrade."""
+
+    fatal: list[str] = None          # type: ignore[assignment]
+    warnings: list[str] = None       # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        self.fatal = [] if self.fatal is None else self.fatal
+        self.warnings = [] if self.warnings is None else self.warnings
+
+    @property
+    def ok(self) -> bool:
+        return not self.fatal
 
 
 class LiveTelegramClient:
@@ -86,12 +148,16 @@ class LiveTelegramClient:
         self._http = http or httpx.Client(timeout=60)
 
     # -- low-level --------------------------------------------------------- #
-    def _call(self, method: str, **params) -> dict:
+    def _call(self, method: str, _hint_key: str = "", **params) -> dict:
         url = f"{self.API}/bot{self.token}/{method}"
         resp = self._http.post(url, json={k: v for k, v in params.items() if v is not None})
         data = resp.json()
         if not data.get("ok", False):
-            raise RuntimeError(_explain(method, params, data))
+            hint_key = _hint_key or (
+                "channel_id" if str(params.get("chat_id")) == str(self.channel_id)
+                and self.channel_id else "group_chat_id"
+            )
+            raise RuntimeError(_explain(method, params, data, hint_key))
         return data["result"]
 
     @staticmethod
@@ -138,10 +204,20 @@ class LiveTelegramClient:
                 raise
 
     def send_channel(self, text: str) -> str:
+        # Empty when unconfigured *or* disabled by preflight — the activity feed is
+        # optional, so a bad channel must never break the work happening in the group.
         if not self.channel_id:
             return ""
-        result = self._call("sendMessage", chat_id=self.channel_id, text=text,
-                            parse_mode="Markdown")
+        try:
+            result = self._call("sendMessage", _hint_key="channel_id",
+                                chat_id=self.channel_id, text=text,
+                                parse_mode="Markdown")
+        except RuntimeError as e:
+            # Degrade, don't crash: work in the group must not fail because the
+            # optional activity feed is misconfigured. Logged once, then disabled.
+            log.warning("activity feed disabled — %s", e)
+            self.disable_channel()
+            return ""
         return str(result["message_id"])
 
     # -- helpers used by the runner --------------------------------------- #
@@ -161,45 +237,65 @@ class LiveTelegramClient:
     def get_chat(self, chat_id: str) -> dict:
         return self._call("getChat", chat_id=chat_id)
 
-    def preflight(self) -> list[str]:
+    def preflight(self) -> "PreflightReport":
         """Validate the live configuration before polling starts.
 
-        Returns a list of human-readable problems (empty when healthy). Checking at
-        startup turns a confusing per-message traceback into one clear message while
-        the operator is still looking at the terminal.
+        Severity matters: the group is load-bearing, so a problem there is **fatal**.
+        The broadcast channel is an optional convenience (TELEGRAM_SETUP.md §5), so a
+        problem there is a **warning** — it disables the activity feed and everything
+        else keeps working. Blocking startup over an optional feature would be the
+        wrong trade.
         """
-        problems: list[str] = []
+        report = PreflightReport()
         try:
             me = self.get_me()
         except RuntimeError as e:
-            return [f"bot token rejected: {e}"]
+            report.fatal.append(f"bot token rejected: {e}")
+            return report
+        self._me = me
 
+        # --- group: fatal ---------------------------------------------------- #
+        structural = chat_ref_problem(self.group_chat_id)
         if not self.group_chat_id:
-            problems.append("group_chat_id is not set — the bot has nowhere to post")
+            report.fatal.append(
+                "group_chat_id is not set — the bot has nowhere to post "
+                "(TELERAFT_GROUP_CHAT_ID or [telegram].group_chat_id)"
+            )
+        elif structural:
+            report.fatal.append(f"group_chat_id {structural}")
         else:
             try:
                 chat = self.get_chat(self.group_chat_id)
                 if chat.get("type") not in ("group", "supergroup"):
-                    problems.append(
+                    report.fatal.append(
                         f"group_chat_id {self.group_chat_id!r} is a "
                         f"{chat.get('type')!r}, expected a group/supergroup"
                     )
                 elif not chat.get("is_forum") and self.topic_threads:
-                    problems.append(
+                    report.warnings.append(
                         "topic_threads is configured but the group does not have Topics "
                         "enabled (Group → Edit → Topics) — messages will ignore threads"
                     )
             except RuntimeError as e:
-                problems.append(f"group chat unreachable: {e}")
+                report.fatal.append(f"group chat unreachable: {e}")
 
+        # --- broadcast channel: optional, so warn and degrade ----------------- #
         if self.channel_id:
-            try:
-                self.get_chat(self.channel_id)
-            except RuntimeError as e:
-                problems.append(f"broadcast channel unreachable: {e}")
+            structural = chat_ref_problem(self.channel_id)
+            if structural:
+                report.warnings.append(f"channel_id {structural}")
+                self.disable_channel()
+            else:
+                try:
+                    self.get_chat(self.channel_id)
+                except RuntimeError as e:
+                    report.warnings.append(f"broadcast channel unreachable: {e}")
+                    self.disable_channel()
+        return report
 
-        self._me = me
-        return problems
+    def disable_channel(self) -> None:
+        """Stop attempting the activity feed after preflight found it unusable."""
+        self.channel_id = ""
 
     def close(self) -> None:
         self._http.close()

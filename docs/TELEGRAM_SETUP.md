@@ -147,6 +147,13 @@ escalations, and soul-amendment proposals.
 2. Add your **workspace bot** as an **administrator** with *Post Messages* permission.
 3. Note its `@handle` (public) or numeric id (private — see §6).
 
+> ⚠️ **Telegram usernames cannot contain hyphens or dots.** A handle is 5–32 characters,
+> starts with a letter, and may contain only letters, digits and underscores. So
+> `@ai-quant-research-ch` is not a valid handle and will never resolve — it would be
+> `@ai_quant_research_ch`. Check the real handle at `t.me/<handle>`. **A private channel
+> has no handle at all**: use its numeric `-100…` id (§6.3). TeleRaft validates this at
+> startup and tells you which rule was broken.
+
 The channel is optional: if you leave `channel_id` blank, TeleRaft simply skips the feed
 and everything still works inside the group.
 
@@ -495,7 +502,8 @@ Also read from the environment: `ANTHROPIC_API_KEY` (when `runtime_engine=claude
 | Agents answer from priors, not your docs | Check `/kb list` — a source may be `error` or empty. Retrieval degrades to ungrounded rather than failing. |
 | Onboarding: `agents cannot approve the onboarding plan` | Working as designed — approve with a human Telegram user ID in `human_ids`. |
 | Heartbeats never fire | The host daemon isn't running, or (OpenClaw) has no external ticker. Check `hermes gateway` status and `TELERAFT_WEBHOOK`. |
-| Nothing posts to the feed | `channel_id` blank or the workspace bot isn't a channel admin with Post rights. |
+| Nothing posts to the feed | `channel_id` blank, the handle is invalid (no hyphens/dots — §5), or the bot isn't a channel admin with Post rights. Preflight warns and disables the feed; the group keeps working. |
+| `channel_id … is not a valid Telegram username` | The handle breaks Telegram's rules (5–32 chars, letters/digits/underscores, starts with a letter). Use the real handle from `t.me/<handle>`, or the numeric `-100…` id for a private channel. |
 | Two instances behave oddly | Only run **one** poller per bot token; don't hit `getUpdates` by hand while it runs. |
 
 ---

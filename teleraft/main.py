@@ -40,15 +40,20 @@ def main() -> None:
         topic_threads=cfg.topic_threads,
     )
 
-    # Fail loudly at startup rather than on the first inbound message.
-    problems = client.preflight()
-    if problems:
-        for problem in problems:
+    # Validate at startup rather than on the first inbound message. Warnings degrade
+    # an optional feature; only fatal problems stop the run.
+    report = client.preflight()
+    for warning in report.warnings:
+        logging.warning("preflight: %s", warning)
+    if not report.ok:
+        for problem in report.fatal:
             logging.error("preflight: %s", problem)
         raise SystemExit(
             "Telegram configuration is not usable — fix the problems above "
             "(see docs/TELEGRAM_SETUP.md §6 and §16) and restart."
         )
+    if report.warnings:
+        logging.warning("starting with reduced functionality (see warnings above)")
     app = App(
         db_path=cfg.db_path,
         agents_dir=cfg.agents_dir,

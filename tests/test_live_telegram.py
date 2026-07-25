@@ -142,51 +142,105 @@ def test_chat_not_found_error_names_the_misconfiguration():
     with pytest.raises(RuntimeError) as e:
         client.send_message("workspace", "hi")
     message = str(e.value)
-    assert "group_chat_id" in message
-    assert "neither a numeric id nor an @handle" in message
+    # A structurally impossible ref gets the precise reason rather than generic advice.
+    assert "workspace" in message
+    assert "neither a numeric chat id" in message and "never resolve" in message
 
 
-def test_preflight_reports_an_unreachable_group():
+def _preflight_client(chat_ok=True, forum=True, channel_id="", chat_type="supergroup"):
     def handler(request: httpx.Request) -> httpx.Response:
         method = request.url.path.rsplit("/", 1)[-1]
         if method == "getMe":
             return httpx.Response(200, json={"ok": True, "result": {"username": "bot"}})
-        return httpx.Response(200, json={"ok": False, "error_code": 400,
-                                         "description": "Bad Request: chat not found"})
+        if not chat_ok:
+            return httpx.Response(200, json={"ok": False, "error_code": 400,
+                                             "description": "Bad Request: chat not found"})
+        return httpx.Response(200, json={"ok": True, "result": {"type": chat_type,
+                                                                "is_forum": forum}})
+    return LiveTelegramClient(token="t", group_chat_id="-100", channel_id=channel_id,
+                              topic_threads={"# content": "2"},
+                              http=httpx.Client(transport=httpx.MockTransport(handler)))
 
-    client = LiveTelegramClient(token="t", group_chat_id="-100",
-                                http=httpx.Client(transport=httpx.MockTransport(handler)))
-    problems = client.preflight()
-    assert problems and "group chat unreachable" in problems[0]
+
+def test_preflight_treats_an_unreachable_group_as_fatal():
+    report = _preflight_client(chat_ok=False).preflight()
+    assert not report.ok
+    assert any("group chat unreachable" in p for p in report.fatal)
 
 
 def test_preflight_passes_on_a_healthy_forum_group():
+    report = _preflight_client().preflight()
+    assert report.ok and report.warnings == []
+
+
+def test_preflight_warns_when_topics_are_configured_without_forum_mode():
+    report = _preflight_client(forum=False).preflight()
+    assert report.ok, "missing forum mode degrades threading, it does not block startup"
+    assert any("Topics enabled" in w for w in report.warnings)
+
+
+@pytest.mark.parametrize("handle,reason", [
+    ("@ai-quant-research-ch", "hyphen is not a legal username character"),
+    ("@my.channel", "dot is not legal either"),
+    ("@abc", "too short (min 5)"),
+    ("workspace", "not numeric and not an @handle"),
+])
+def test_structurally_invalid_chat_refs_are_caught_without_calling_telegram(handle, reason):
+    from teleraft.telegram.live_client import chat_ref_problem
+    problem = chat_ref_problem(handle)
+    assert problem, reason
+    assert handle in problem
+
+
+@pytest.mark.parametrize("ref", ["-1001234567890", "@good_channel", "@Channel123"])
+def test_plausible_chat_refs_pass_structural_validation(ref):
+    from teleraft.telegram.live_client import chat_ref_problem
+    assert chat_ref_problem(ref) is None
+
+
+def test_bad_channel_handle_warns_and_disables_the_feed_but_starts():
+    """Regression: an invalid channel handle used to abort startup entirely."""
+    client = _preflight_client(channel_id="@ai-quant-research-ch")
+    report = client.preflight()
+
+    assert report.ok, "an optional feed must not block startup"
+    assert any("channel_id" in w and "hyphen" not in w.lower() or "-" in w
+               for w in report.warnings)
+    assert any("valid Telegram username" in w for w in report.warnings)
+    assert client.channel_id == "", "the unusable feed should be disabled"
+
+    # And posting to the feed is now a silent no-op rather than an exception.
+    assert client.send_channel("digest") == ""
+
+
+def test_channel_failure_at_runtime_degrades_instead_of_raising():
+    state = {"fail": False}
+
     def handler(request: httpx.Request) -> httpx.Response:
-        method = request.url.path.rsplit("/", 1)[-1]
-        if method == "getMe":
-            return httpx.Response(200, json={"ok": True, "result": {"username": "bot"}})
-        return httpx.Response(200, json={"ok": True, "result": {"type": "supergroup",
-                                                                "is_forum": True}})
+        if state["fail"]:
+            return httpx.Response(200, json={"ok": False, "error_code": 400,
+                                             "description": "Bad Request: chat not found"})
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 1}})
 
-    client = LiveTelegramClient(token="t", group_chat_id="-100",
-                                topic_threads={"# content": "2"},
+    client = LiveTelegramClient(token="t", group_chat_id="-100", channel_id="@feed",
                                 http=httpx.Client(transport=httpx.MockTransport(handler)))
-    assert client.preflight() == []
+    assert client.send_channel("first") == "1"
+    state["fail"] = True
+    assert client.send_channel("second") == ""      # degraded, not raised
+    assert client.channel_id == ""
 
 
-def test_preflight_flags_topics_configured_without_forum_mode():
+def test_channel_error_hint_names_channel_id_not_group_chat_id():
     def handler(request: httpx.Request) -> httpx.Response:
-        method = request.url.path.rsplit("/", 1)[-1]
-        if method == "getMe":
-            return httpx.Response(200, json={"ok": True, "result": {"username": "bot"}})
-        return httpx.Response(200, json={"ok": True, "result": {"type": "supergroup",
-                                                                "is_forum": False}})
+        return httpx.Response(200, json={"ok": False, "error_code": 400,
+                                         "description": "Bad Request: chat not found"})
 
-    client = LiveTelegramClient(token="t", group_chat_id="-100",
-                                topic_threads={"# content": "2"},
+    client = LiveTelegramClient(token="t", group_chat_id="-100", channel_id="@missing_chan",
                                 http=httpx.Client(transport=httpx.MockTransport(handler)))
-    problems = client.preflight()
-    assert problems and "Topics enabled" in problems[0]
+    with pytest.raises(RuntimeError) as e:
+        client._call("getChat", _hint_key="channel_id", chat_id="@missing_chan")
+    assert "channel_id" in str(e.value)
+    assert "administrator of the channel" in str(e.value)
 
 
 def test_normalize_callback():
