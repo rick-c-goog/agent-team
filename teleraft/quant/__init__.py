@@ -18,24 +18,43 @@ from .backtest import (
     BacktestResult,
     SignalSpec,
     SPEC_TYPES,
+    apply_settlement,
     backtest,
     generate_weights,
 )
-from .data import Bars, CsvLoader, MarketDataLoader, SyntheticLoader, split_period
+from .data import (
+    Bars,
+    CsvLoader,
+    LoaderRegistry,
+    MarketDataLoader,
+    SyntheticLoader,
+    split_period,
+)
 from .hypothesis import Hypothesis, HypothesisRegistry, HypothesisStatus
+from .markets import MARKETS, Market, market_for, resolve_market
+from .portfolio import CurrencyMismatch, PortfolioResult, backtest_portfolio
 
 __all__ = [
     "Bars",
     "BacktestResult",
     "CsvLoader",
+    "CurrencyMismatch",
     "Hypothesis",
     "HypothesisRegistry",
     "HypothesisStatus",
+    "LoaderRegistry",
+    "MARKETS",
+    "Market",
     "MarketDataLoader",
+    "PortfolioResult",
     "SPEC_TYPES",
     "SignalSpec",
     "SyntheticLoader",
+    "apply_settlement",
     "backtest",
+    "backtest_portfolio",
     "generate_weights",
+    "market_for",
+    "resolve_market",
     "split_period",
 ]

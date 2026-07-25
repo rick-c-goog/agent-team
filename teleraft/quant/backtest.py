@@ -20,6 +20,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
 
 from .data import TRADING_DAYS, Bars
+from .markets import Market, resolve_market
 
 # Every spec type the agents are allowed to propose. Anything else is rejected at
 # validation time — the allow-list *is* the safety boundary.
@@ -79,9 +80,17 @@ def _sma(values: list[float], window: int, i: int) -> Optional[float]:
     return sum(values[i + 1 - window: i + 1]) / window
 
 
-def generate_weights(bars: Bars, spec: SignalSpec) -> list[float]:
-    """Target weight in [-1, 1] for each bar, computed from information up to that bar."""
+def generate_weights(bars: Bars, spec: SignalSpec,
+                     periods_per_year: Optional[int] = None) -> list[float]:
+    """Target weight in [-1, 1] for each bar, computed from information up to that bar.
+
+    `periods_per_year` matters for any signal that reasons in *annualised* terms —
+    `vol_target` sizes against an annual vol target, so using 252 on a crypto series
+    would mis-size every position. Defaults to the symbol's market convention.
+    """
     spec.validate()
+    if periods_per_year is None:
+        periods_per_year = resolve_market(bars.symbol).periods_per_year
     n = len(bars)
     closes = bars.closes
     weights = [0.0] * n
@@ -139,7 +148,7 @@ def generate_weights(bars: Bars, spec: SignalSpec) -> list[float]:
             window = rets[i + 1 - lookback: i + 1]
             mean = sum(window) / len(window)
             var = sum((r - mean) ** 2 for r in window) / max(1, len(window) - 1)
-            realized = math.sqrt(var * TRADING_DAYS)
+            realized = math.sqrt(var * periods_per_year)
             weights[i] = min(1.0, target / realized) if realized > 0 else 0.0
         return weights
 
@@ -153,6 +162,8 @@ def generate_weights(bars: Bars, spec: SignalSpec) -> list[float]:
 class BacktestResult:
     symbol: str
     spec: str
+    market: str = "US"          # conventions used (annualisation, costs, settlement)
+    currency: str = "USD"
     start: str = ""
     end: str = ""
     bars: int = 0
@@ -175,21 +186,61 @@ class BacktestResult:
         return d
 
     def summary(self) -> str:
-        return (f"{self.spec} on {self.symbol} [{self.start}→{self.end}]: "
+        return (f"{self.spec} on {self.symbol} ({self.market}) [{self.start}→{self.end}]: "
                 f"CAGR {self.cagr:+.1%}, Sharpe {self.sharpe:.2f}, "
                 f"maxDD {self.max_drawdown:.1%}, turnover {self.turnover:.1f}x, "
                 f"vs buy&hold {self.benchmark_return:+.1%}")
 
 
-def backtest(bars: Bars, spec: SignalSpec, commission: float = 0.001,
-             risk_free: float = 0.0) -> BacktestResult:
-    """Run `spec` over `bars`, trading the signal with a one-bar lag and costs."""
+def apply_settlement(weights: list[float], min_holding_bars: int) -> list[float]:
+    """Enforce a minimum holding period: a position opened at bar *i* cannot be reduced
+    before bar *i + min_holding_bars*.
+
+    Note on T+1 markets (China A-shares): at **daily** bars, T+1 is already satisfied by
+    the one-bar signal lag — a position established at bar *i* is exited at bar *i+1* at
+    the earliest, which is exactly T+1. So `min_holding_bars=1` is a no-op on daily data
+    and is correct rather than redundant: it binds when you feed intraday bars. The
+    constraints that actually bite on A-shares at daily frequency are the short ban and
+    the higher costs, both applied in `backtest()`.
+    """
+    if min_holding_bars <= 0:
+        return list(weights)
+
+    out = list(weights)
+    held_until = -1
+    prev = 0.0
+    for i, w in enumerate(out):
+        if i < held_until and abs(w) < abs(prev):
+            out[i] = prev                       # locked in: cannot sell yet
+        elif abs(w) > abs(prev):
+            held_until = i + min_holding_bars    # opened/increased → start the clock
+        prev = out[i]
+    return out
+
+
+def backtest(bars: Bars, spec: SignalSpec, commission: Optional[float] = None,
+             risk_free: float = 0.0, market: Optional[Market | str] = None,
+             slippage: Optional[float] = None) -> BacktestResult:
+    """Run `spec` over `bars` with the conventions of its market.
+
+    Market conventions decide annualisation, costs, and settlement — pass `market` to
+    override, otherwise it is inferred from the ticker (`600519.SS` → China A-shares,
+    `BTC-USD` → crypto, …). See markets.py for why this is a correctness issue.
+    """
     spec.validate()
     n = len(bars)
     if n < 3:
         raise ValueError(f"need at least 3 bars to backtest, got {n}")
 
-    weights = generate_weights(bars, spec)
+    mkt = resolve_market(bars.symbol, market)
+    commission = mkt.commission if commission is None else commission
+    slippage = mkt.slippage if slippage is None else slippage
+    cost_per_turn = commission + slippage
+
+    weights = generate_weights(bars, spec, mkt.periods_per_year)
+    if not mkt.allows_short:
+        weights = [max(0.0, w) for w in weights]
+    weights = apply_settlement(weights, mkt.min_holding_bars)
     rets = bars.returns()                       # length n-1; rets[i] is bar i→i+1
 
     equity = [1.0]
@@ -206,21 +257,22 @@ def backtest(bars: Bars, spec: SignalSpec, commission: float = 0.001,
         turnover += delta
         if delta > 1e-9:
             trades += 1
-        cost = delta * commission
+        cost = delta * cost_per_turn
         r = w * rets[i] - cost
         strategy_rets.append(r)
         equity.append(equity[-1] * (1.0 + r))
         exposure_sum += abs(w)
         prev_w = w
 
-    years = max(len(strategy_rets) / TRADING_DAYS, 1e-9)
+    periods = mkt.periods_per_year
+    years = max(len(strategy_rets) / periods, 1e-9)
     total_return = equity[-1] - 1.0
     cagr = (equity[-1] ** (1.0 / years) - 1.0) if equity[-1] > 0 else -1.0
 
     mean_r = sum(strategy_rets) / len(strategy_rets)
     var = sum((r - mean_r) ** 2 for r in strategy_rets) / max(1, len(strategy_rets) - 1)
-    ann_vol = math.sqrt(var * TRADING_DAYS)
-    sharpe = ((mean_r * TRADING_DAYS - risk_free) / ann_vol) if ann_vol > 1e-12 else 0.0
+    ann_vol = math.sqrt(var * periods)
+    sharpe = ((mean_r * periods - risk_free) / ann_vol) if ann_vol > 1e-12 else 0.0
 
     peak, max_dd = equity[0], 0.0
     for value in equity:
@@ -236,6 +288,8 @@ def backtest(bars: Bars, spec: SignalSpec, commission: float = 0.001,
     return BacktestResult(
         symbol=bars.symbol,
         spec=spec.describe(),
+        market=mkt.code,
+        currency=mkt.currency,
         start=bars.dates[0] if bars.dates else "",
         end=bars.dates[-1] if bars.dates else "",
         bars=n,

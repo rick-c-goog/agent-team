@@ -174,6 +174,63 @@ def _trading_dates(start: str, n: int) -> list[str]:
     return out
 
 
+# --------------------------------------------------------------------------- #
+# Loader registry — per-market fallback chains (`source: auto`)
+# --------------------------------------------------------------------------- #
+class LoaderRegistry:
+    """Tries loaders in order for a symbol's market, failing over on error.
+
+    This is the cross-market routing layer: US symbols might resolve through one
+    provider chain, A-shares through another, crypto through a third. A chain that
+    exhausts every loader raises with each failure listed — a silent empty series is
+    the worst possible outcome for a backtest, so it never happens.
+
+        registry = LoaderRegistry(
+            chains={"US": [yfinance, csv], "CRYPTO": [ccxt, csv]},
+            default=[SyntheticLoader()],
+        )
+    """
+
+    name = "auto"
+
+    def __init__(self, chains: Optional[dict[str, list]] = None,
+                 default: Optional[list] = None):
+        self.chains = chains or {}
+        # `is None`, not `or`: an explicitly empty default means "no fallback", and
+        # silently replacing it with synthetic data would fabricate prices.
+        self.default = [SyntheticLoader()] if default is None else list(default)
+        self.failures: list[dict] = []          # provider health, surfaced to the desk
+
+    def chain_for(self, symbol: str) -> list:
+        from .markets import market_for
+
+        return self.chains.get(market_for(symbol).code, self.default)
+
+    def load(self, symbol: str, start: str = "", end: str = "") -> Bars:
+        errors: list[str] = []
+        for loader in self.chain_for(symbol):
+            try:
+                bars = loader.load(symbol, start, end)
+            except Exception as e:
+                errors.append(f"{getattr(loader, 'name', loader)}: {type(e).__name__}: {e}")
+                self.failures.append({"symbol": symbol,
+                                      "loader": getattr(loader, "name", str(loader)),
+                                      "error": str(e)})
+                continue
+            if len(bars) == 0:
+                errors.append(f"{getattr(loader, 'name', loader)}: returned no bars")
+                continue
+            return bars
+        raise LookupError(
+            f"no loader could supply {symbol}; tried "
+            f"{[getattr(l, 'name', str(l)) for l in self.chain_for(symbol)]}: "
+            + "; ".join(errors)
+        )
+
+    def health(self) -> list[dict]:
+        return list(self.failures)
+
+
 def split_period(bars: Bars, oos_fraction: float = 0.3) -> tuple[Bars, Bars]:
     """Split into in-sample / out-of-sample halves.
 

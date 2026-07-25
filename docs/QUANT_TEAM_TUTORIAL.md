@@ -4,13 +4,15 @@
 
 This guide builds a working research desk — four agents in a Telegram workspace that
 propose hypotheses, backtest them, tear each other's work apart, and get better over
-time. It follows the two headline features of
+time. It follows three headline features of
 [HKUDS/Vibe-Trading](https://github.com/HKUDS/Vibe-Trading):
 
 - **Self-Improving Trading Agent** — hypothesis → signal engine → backtest → metrics →
   refine, with a registry that tracks lineage and invalidation
 - **Multi-Agent Trading Teams** — specialised roles (factor researcher, backtester, risk
   officer, macro analyst) working in parallel toward a reviewed conclusion
+- **Cross-Market Data & Backtesting** — A-shares, HK, US, crypto and FX, each with its own
+  calendar, costs, settlement and currency, and portfolios that span them
 
 Everything here runs **offline with no API keys and no network**, on deterministic
 synthetic data, so you can complete the whole tutorial before deciding whether to point
@@ -27,13 +29,14 @@ it at real market data.
 5. [The research loop, step by step](#5-the-research-loop-step-by-step)
 6. [The self-improving part: the hypothesis registry](#6-the-self-improving-part-the-hypothesis-registry)
 7. [Running the desk from Telegram](#7-running-the-desk-from-telegram)
-8. [Using real market data](#8-using-real-market-data)
-9. [Using a real LLM for the research prose](#9-using-a-real-llm-for-the-research-prose)
-10. [Tuning the research bar](#10-tuning-the-research-bar)
-11. [Adding a new strategy family](#11-adding-a-new-strategy-family)
-12. [Autonomous research with heartbeats](#12-autonomous-research-with-heartbeats)
-13. [What this design does differently from Vibe-Trading](#13-what-this-design-does-differently-from-vibe-trading)
-14. [Troubleshooting](#14-troubleshooting)
+8. [Cross-market data & backtesting](#8-cross-market-data--backtesting)
+9. [Using real market data](#9-using-real-market-data)
+10. [Using a real LLM for the research prose](#10-using-a-real-llm-for-the-research-prose)
+11. [Tuning the research bar](#11-tuning-the-research-bar)
+12. [Adding a new strategy family](#12-adding-a-new-strategy-family)
+13. [Autonomous research with heartbeats](#13-autonomous-research-with-heartbeats)
+14. [What this design does differently from Vibe-Trading](#14-what-this-design-does-differently-from-vibe-trading)
+15. [Troubleshooting](#15-troubleshooting)
 
 ---
 
@@ -72,9 +75,12 @@ trade"**, and every research note lands in **In Review** where a human must tap 
 | DAG scheduler blocking downstream on failure | The graph engine's Orchestrator: retry → replan → escalate, with checkpoints | [`graph/engine.py`](../teleraft/graph/engine.py) |
 | Research Autopilot (hypothesis → signal → backtest → refine) | The Anthropic loop: Planner → Builder → Tester → Learn | §5 |
 | Hypothesis Registry with invalidation | `HypothesisRegistry` — blocks re-testing dead ideas | [`quant/hypothesis.py`](../teleraft/quant/hypothesis.py) |
-| Signal-engine code generation + AST sandbox | **Declarative `SignalSpec`** — validated data, never generated code | §13 |
+| Signal-engine code generation + AST sandbox | **Declarative `SignalSpec`** — validated data, never generated code | §14 |
 | Backtest engine, metrics, run cards | `backtest()` + `BacktestResult` + `QuantRuntime.run_card()` | [`quant/backtest.py`](../teleraft/quant/backtest.py) |
-| `get_market_data` tool + loader registry | `MarketDataLoader` protocol: synthetic, CSV, or your provider | §8 |
+| Cross-market coverage (A-share/HK/US/crypto/FX) | `Market` registry: calendars, costs, settlement, currency per venue | [`quant/markets.py`](../teleraft/quant/markets.py), §8 |
+| Composite backtests mixing markets, shared capital pool | `backtest_portfolio()` with per-symbol attribution and an FX guard | [`quant/portfolio.py`](../teleraft/quant/portfolio.py), §8.3 |
+| `source: auto` per-market provider fallback chains | `LoaderRegistry` — ordered chains, failover, source health | §8.5 |
+| `get_market_data` tool + loader registry | `MarketDataLoader` protocol: synthetic, CSV, or your provider | §9 |
 | Persistent memory across sessions | `MemoryService` + soul amendments | §6 |
 | 16 IM channel adapters | Telegram is the native surface; Hermes/OpenClaw add the rest | [TELEGRAM_SETUP.md](TELEGRAM_SETUP.md) |
 | Broker connectors, live trading, mandates | **Deliberately out of scope** | §1 |
@@ -344,7 +350,201 @@ never by chat, so the registry stays an honest record of what was actually teste
 
 ---
 
-## 8. Using real market data
+## 8. Cross-market data & backtesting
+
+A desk that only researches US equities is not a desk. This section covers Vibe-Trading's
+third feature — coverage across A-shares, HK, US, crypto and FX — and it is worth
+understanding *why* it is a correctness feature rather than a breadth feature.
+
+### 8.1 The bug that motivates it
+
+Sharpe ratios are annualised: `Sharpe = mean_return × periods / (σ × √periods)`. Equities
+trade ~252 days a year; crypto trades 365. Annualise a crypto strategy with 252 and every
+number is wrong by a factor of `√(365/252)` ≈ **1.20**:
+
+```python
+crypto = backtest(bars, spec, market="CRYPTO")   # 365/yr → Sharpe 0.0736
+as_equity = backtest(bars, spec, market="US")    # 252/yr → Sharpe 0.0612
+```
+
+That is a ~20% misstatement produced silently, by a constant. The same class of error
+applies to costs (HK stamp duty is ~2× US commission), to shorting (A-share retail
+shorting is effectively unavailable), and to currency (adding HKD P&L to USD P&L gives a
+number that means nothing).
+
+So the conventions are **data**, in [`quant/markets.py`](../teleraft/quant/markets.py),
+and every result carries the ones that produced it.
+
+### 8.2 The market registry
+
+| Market | Ticker convention | Currency | Periods/yr | Round-trip cost | Shorting |
+|---|---|---|---|---|---|
+| `US` | `AAPL`, `SPY.US` | USD | 252 | 10 bp | yes |
+| `HK` | `0700.HK` | HKD | 246 | 19 bp | yes |
+| `CN` | `600519.SS`, `000001.SZ` | CNY | 243 | 18 bp | **no** |
+| `CRYPTO` | `BTC-USD`, `ETHUSDT` | USD | 365 | 25 bp | yes |
+| `FX` | `EURUSD=X` | USD | 260 | 3 bp | yes |
+
+The market is inferred from the ticker, or passed explicitly:
+
+```python
+from teleraft.quant import backtest, market_for, SignalSpec
+
+market_for("600519.SS").code        # 'CN'   — T+1, no shorting, CNY
+market_for("BTC-USD").periods_per_year   # 365
+
+backtest(bars, spec)                     # conventions inferred from bars.symbol
+backtest(bars, spec, market="HK")        # explicit override
+```
+
+Results carry their provenance, so a number never travels without its assumptions:
+
+```
+sma_cross(fast=20, slow=100) on 600519.SS (CN) [2020-01-01→2025-09-30]:
+    CAGR +2.3%, Sharpe 0.23, maxDD 28.9%, turnover 21.0x, vs buy&hold +26.5%
+```
+
+> **On T+1.** China A-shares settle T+1, and `min_holding_bars=1` records that. At
+> **daily** bars it is already satisfied by the one-bar signal lag — a position taken at
+> bar *i* is exited at *i+1* at the earliest, which *is* T+1 — so the setting is a no-op
+> on daily data and binds only on intraday bars. The A-share constraints that actually
+> bite at daily frequency are the **short ban** and the **higher costs**, both applied
+> automatically. Saying this precisely matters: a guide that claims T+1 is "handled"
+> without saying when it binds is teaching you to trust the wrong thing.
+
+### 8.3 Portfolio backtests across venues
+
+Single-symbol research is a toy; the unit a desk decides on is a portfolio. Capital is
+shared across sleeves and each symbol's signal scales its own:
+
+```python
+from teleraft.quant import SyntheticLoader, SignalSpec, backtest_portfolio
+
+loader = SyntheticLoader()
+universe = {s: loader.load(s) for s in ["SPY", "QQQ", "BTC-USD"]}
+p = backtest_portfolio(universe, SignalSpec("momentum", {"lookback": 60}))
+
+print(p.summary())
+# portfolio[3 symbols across CRYPTO+US] [2020-01-01→2025-09-30]:
+#   CAGR +24.7%, Sharpe 2.33, maxDD 6.8%, vs equal-weight buy&hold +129.9% (USD)
+
+for line in p.attribution_lines():
+    print(line)
+# SPY (US): contributed +78.5%, exposure 68%
+# BTC-USD (CRYPTO): contributed +22.6%, exposure 42%
+# QQQ (US): contributed +18.9%, exposure 48%
+```
+
+Three cross-market problems it handles explicitly:
+
+- **Different calendars.** Returns are joined on the **union** of dates. A symbol whose
+  venue was closed contributes nothing that day rather than having its history shifted
+  forward — which would fabricate alignment that never existed.
+- **Blended annualisation.** `p.periods_per_year` is the exposure-weighted average of the
+  constituent venues (282.08 above, between 252 and 365), not a constant.
+- **Attribution that reconciles.** Per-symbol `contribution` figures are arithmetic, so
+  they sum **exactly** to `p.arithmetic_return`. They do not sum to `p.total_return`,
+  which compounds — both figures exist so the difference is explicit rather than a
+  rounding mystery.
+
+### 8.4 Currencies: refused, not guessed
+
+Adding HKD P&L to USD P&L silently is the kind of error that produces a confident,
+meaningless backtest. So it raises:
+
+```python
+>>> backtest_portfolio({"SPY": spy, "0700.HK": tencent}, spec)
+CurrencyMismatch: portfolio spans ['HKD', 'USD'] with no fx_rates supplied —
+    converting is your decision, not the backtester's. Pass base_currency= and
+    fx_rates={'HKD': 0.128, ...}, or restrict the universe to one currency.
+```
+
+Supply the conversion and it proceeds:
+
+```python
+p = backtest_portfolio(
+    {"SPY": spy, "0700.HK": tencent, "600519.SS": moutai},
+    SignalSpec("momentum", {"lookback": 60}),
+    base_currency="USD",
+    fx_rates={"USD": 1.0, "HKD": 0.128, "CNY": 0.138},
+)
+```
+
+A constant rate is a simplification — real cross-currency P&L needs an FX *series*. The
+constant is honest about being a constant, which is the point.
+
+### 8.5 Provider fallback chains (`source: auto`)
+
+Vibe-Trading routes each market through a chain of providers. `LoaderRegistry` is the
+same idea: try loaders in order, fail over on error, and **never** return an empty series
+silently.
+
+```python
+from teleraft.quant import LoaderRegistry, CsvLoader, SyntheticLoader
+
+registry = LoaderRegistry(
+    chains={
+        "US":     [YFinanceLoader(), CsvLoader("data")],
+        "CRYPTO": [CcxtLoader(), CsvLoader("data")],
+        "CN":     [TushareLoader(), CsvLoader("data")],
+    },
+    default=[CsvLoader("data")],
+)
+
+bars = registry.load("BTC-USD")      # tries ccxt, falls back to CSV
+registry.health()                     # [{'symbol': ..., 'loader': 'ccxt', 'error': ...}]
+```
+
+If every loader in a chain fails, it raises `LookupError` listing each failure. A backtest
+on an empty series is worse than no backtest, so that outcome is impossible by
+construction. (Pass `default=[]` to mean "no fallback" — an explicitly empty chain is
+honoured rather than being replaced with synthetic data.)
+
+### 8.6 Asking the desk a cross-market question
+
+Mention several tickers and the loop researches them as a portfolio:
+
+```
+@Quinn is there a momentum edge across SPY, QQQ and BTC-USD?
+```
+
+The Planner adds cross-market acceptance criteria automatically:
+
+```
+🧭 Plan by Quinn — acceptance criteria:
+  1. Hypothesis registered and testable: momentum produces risk-adjusted edge on
+     the SPY, QQQ, BTC-USD portfolio
+  2. Out-of-sample Sharpe ≥ 0.5
+  ...
+  6. Each venue's own conventions are applied (CRYPTO+US: annualisation, costs,
+     settlement, shorting)
+  risks: venues keep different calendars — alignment is by date, not by row
+```
+
+and the review card carries the venue mix and per-symbol attribution. If the universe
+spans currencies without FX rates configured, the Builder reports it as blocked work for
+a human rather than inventing a rate.
+
+The `run_card` records exactly which conventions produced the numbers:
+
+```python
+card["venues"]                                        # ['CRYPTO', 'US']
+card["market_conventions"]["BTC-USD"]["periods_per_year"]   # 365
+card["market_conventions"]["SPY"]["periods_per_year"]       # 252
+```
+
+### 8.7 What is deliberately not here
+
+Vibe-Trading covers futures and options with contract specifications, margin, and roll
+logic; it also handles India's T+1 delivery and 18+ providers. This implementation covers
+**spot instruments only** — equities, crypto, and FX as price series. Futures and options
+need contract multipliers, expiry, roll conventions, and margin modelling, and a backtest
+that treats an option like a stock is not approximately right, it is wrong. Adding them
+means adding an instrument model, not a market row.
+
+---
+
+## 9. Using real market data
 
 Synthetic data proves the machinery works; it says nothing about markets. To use real
 prices, implement the loader protocol — it has exactly one method:
@@ -404,7 +604,7 @@ returns that never existed — the single most common way a backtest lies to you
 
 ---
 
-## 9. Using a real LLM for the research prose
+## 10. Using a real LLM for the research prose
 
 `QuantRuntime` is deterministic: it has no model calls, which is why the tests can
 assert on exact Sharpe ratios. That is a feature for the numeric roles and a limitation
@@ -432,7 +632,7 @@ appreciative to say about almost anything; a held-out Sharpe ratio will not.
 
 ---
 
-## 10. Tuning the research bar
+## 11. Tuning the research bar
 
 The thresholds live in one place and are deliberately strict — **most ideas should die**:
 
@@ -462,7 +662,7 @@ feels about right for a research process that is working.
 
 ---
 
-## 11. Adding a new strategy family
+## 12. Adding a new strategy family
 
 Two edits, both in reviewed code — never generated at runtime.
 
@@ -495,7 +695,7 @@ reviewed.
 
 ---
 
-## 12. Autonomous research with heartbeats
+## 13. Autonomous research with heartbeats
 
 Quinn's heartbeat is already declared:
 
@@ -517,7 +717,7 @@ must be one that has not already been killed.
 
 ---
 
-## 13. What this design does differently from Vibe-Trading
+## 14. What this design does differently from Vibe-Trading
 
 Both systems implement the same two features. Three choices here differ, and they are
 worth understanding before you pick one:
@@ -552,7 +752,7 @@ signature — and you would rather add data providers than remove execution path
 
 ---
 
-## 14. Troubleshooting
+## 15. Troubleshooting
 
 | Symptom | Cause / fix |
 |---|---|
@@ -565,6 +765,13 @@ signature — and you would rather add data providers than remove execution path
 | Run escalates with "families exhausted" | A negative result, not a bug. No family in the grid found an out-of-sample edge; add a family or change the universe. |
 | A live-trading question stalls at a gate | Also working as intended: `escalate_when` fires before any step runs (§4). |
 | Backtest looks too good | Check turnover and costs. Raise `commission`, and read the note's `📚 Sources` line — every number should trace to a backtest artifact. |
+| `CurrencyMismatch: portfolio spans [...]` | Working as intended (§8.4). Supply `base_currency` + `fx_rates`, or keep the universe to one currency. |
+| Crypto Sharpe looks different than before | It is now annualised with 365 rather than 252 (§8.1). The old number was wrong by ~20%. |
+| A-share strategy never shorts | Correct: `CN.allows_short = False`, enforced in `backtest()`. Retail A-share shorting is effectively unavailable. |
+| `LookupError: no loader could supply <symbol>` | Every provider in that market's chain failed; the error lists each failure. An empty series is never returned silently (§8.5). |
+| Attribution does not sum to the headline return | It sums to `arithmetic_return`, not the compounded `total_return` (§8.3). Both are reported. |
+| Passing `commission=0` still shows costs | Slippage is a separate market convention. Pass `slippage=0.0` too for a cost-free run. |
+| Futures/options symbols behave like stocks | Out of scope (§8.7) — they need contract multipliers, expiry and margin. Do not use spot backtests for them. |
 
 ---
 

@@ -63,15 +63,24 @@ def main() -> None:
 
     # ================================================================== #
     print("\n" + RULE)
+    print("SCENARIO C — cross-market: one portfolio spanning two venues\n")
+    print("  👤 rick: @Quinn is there a momentum edge across SPY, QQQ and BTC-USD?\n")
+    _ask(app, "@Quinn is there a momentum edge across SPY, QQQ and BTC-USD")
+    _dump(app, only_verdicts=True)
+    _show_conventions()
+
+    # ================================================================== #
+    print("\n" + RULE)
     print("THE RESEARCH RECORD — /hyp list\n")
     for h in app.hypotheses.list():
         print("  " + h.short())
         if h.invalidated_reason:
             print(f"      ↳ {h.invalidated_reason}")
         for r in h.results:
-            sample = "IS " if r["start"] <= _midpoint(h) else "OOS"
-            print(f"      · {sample} {r['spec']:<40} Sharpe {r['sharpe']:+.2f}  "
-                  f"maxDD {r['max_drawdown']:.1%}  CAGR {r['cagr']:+.1%}")
+            sample = "IS " if r.get("start", "") <= _midpoint(h) else "OOS"
+            print(f"      · {sample} {r.get('spec', '?'):<40} "
+                  f"Sharpe {r.get('sharpe', 0):+.2f}  "
+                  f"maxDD {r.get('max_drawdown', 0):.1%}  CAGR {r.get('cagr', 0):+.1%}")
 
     # ================================================================== #
     print("\n" + RULE)
@@ -97,6 +106,36 @@ def main() -> None:
     print("\n" + RULE)
     print("Research output only. Not investment advice. This system places no orders.")
     app.close()
+
+
+def _show_conventions() -> None:
+    """Each venue's own conventions — the reason cross-market is a correctness feature."""
+    from .quant.markets import market_for
+    from .quant.portfolio import CurrencyMismatch, backtest_portfolio
+    from .quant.backtest import SignalSpec
+    from .quant.data import SyntheticLoader
+
+    print("\n  Venue conventions actually applied:")
+    for sym in ("SPY", "BTC-USD", "600519.SS", "0700.HK"):
+        m = market_for(sym)
+        print(f"    {sym:12} {m.code:7} {m.currency}  {m.periods_per_year:>3}d/yr  "
+              f"cost {m.round_trip_cost*1e4:>4.0f}bp  short={'yes' if m.allows_short else 'NO '}")
+
+    loader = SyntheticLoader()
+    p = backtest_portfolio({s: loader.load(s) for s in ("SPY", "QQQ", "BTC-USD")},
+                           SignalSpec("momentum", {"lookback": 60}))
+    print(f"\n  {p.summary()}")
+    print(f"  blended annualisation: {p.periods_per_year} periods/yr "
+          f"(between US 252 and crypto 365)")
+    for line in p.attribution_lines():
+        print("    ·", line)
+
+    print("\n  Cross-currency without FX rates is refused, not guessed:")
+    try:
+        backtest_portfolio({s: loader.load(s) for s in ("SPY", "0700.HK")},
+                           SignalSpec("buy_and_hold"))
+    except CurrencyMismatch as e:
+        print(f"    ⛔ {str(e).split(' — ')[0]}")
 
 
 def _ask(app, text: str):

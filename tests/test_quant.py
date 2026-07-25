@@ -64,7 +64,7 @@ def _ramp(n: int = 300, step: float = 0.01) -> Bars:
 
 def test_buy_and_hold_matches_the_benchmark():
     bars = _ramp()
-    r = backtest(bars, SignalSpec("buy_and_hold"), commission=0.0)
+    r = backtest(bars, SignalSpec("buy_and_hold"), commission=0.0, slippage=0.0)
     assert r.total_return == pytest.approx(r.benchmark_return, rel=1e-6)
     assert r.trades == 1                       # one entry, then held
     assert r.max_drawdown == pytest.approx(0.0, abs=1e-9)
@@ -79,7 +79,8 @@ def test_no_lookahead_the_warmup_window_is_genuinely_missed():
     """
     n, step, lookback = 60, 0.01, 20
     bars = _ramp(n, step)
-    r = backtest(bars, SignalSpec("momentum", {"lookback": lookback}), commission=0.0)
+    r = backtest(bars, SignalSpec("momentum", {"lookback": lookback}),
+                 commission=0.0, slippage=0.0)
 
     traded_bars = (n - 1) - lookback            # rets has n-1 entries; first L are flat
     expected = (1 + step) ** traded_bars - 1
@@ -90,7 +91,8 @@ def test_no_lookahead_the_warmup_window_is_genuinely_missed():
 
 def test_a_signal_that_never_fires_earns_nothing():
     bars = _ramp(50)
-    flat = backtest(bars, SignalSpec("momentum", {"lookback": len(bars) + 10}), commission=0.0)
+    flat = backtest(bars, SignalSpec("momentum", {"lookback": len(bars) + 10}),
+                    commission=0.0, slippage=0.0)
     assert flat.total_return == pytest.approx(0.0, abs=1e-12)
     assert flat.trades == 0
 
@@ -106,7 +108,7 @@ def test_commission_is_charged_on_turnover():
 
 def test_metrics_are_internally_consistent():
     bars = SyntheticLoader().load("QQQ")
-    r = backtest(bars, SignalSpec("buy_and_hold"), commission=0.0)
+    r = backtest(bars, SignalSpec("buy_and_hold"), commission=0.0, slippage=0.0)
     assert 0.0 <= r.max_drawdown <= 1.0
     assert 0.0 <= r.hit_rate <= 1.0
     assert r.bars == len(bars)

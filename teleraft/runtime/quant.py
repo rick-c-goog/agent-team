@@ -29,6 +29,8 @@ from ..models import Artifact, Citation, Plan, Verdict
 from ..quant.backtest import BacktestResult, SignalSpec, backtest
 from ..quant.data import Bars, MarketDataLoader, SyntheticLoader, split_period
 from ..quant.hypothesis import DuplicateHypothesis, HypothesisRegistry
+from ..quant.markets import market_for
+from ..quant.portfolio import CurrencyMismatch, backtest_portfolio
 from .base import RoleRequest
 
 # Default research bar. Deliberately strict: most ideas should die here.
@@ -68,22 +70,31 @@ def _family_for(text: str) -> str:
     return "sma_cross"
 
 
-def _symbol_for(text: str, default: str = "SPY") -> str:
-    """Extract a ticker from the task wording.
+def _symbols_for(text: str, default: str = "SPY") -> list[str]:
+    """Extract every ticker mentioned, preserving order.
 
-    Tickers are written in caps by convention (`NVDA`, `BTC-USD`), so an already-uppercase
-    token is a far better signal than a stop-word list — which silently mis-fires on
-    ordinary words like "HAVE".
+    Tickers are written in caps by convention (`NVDA`, `BTC-USD`, `0700.HK`), so an
+    already-uppercase token is a far better signal than a stop-word list — which
+    silently mis-fires on ordinary words like "HAVE". More than one ticker means a
+    **cross-market universe**, which the loop backtests as a portfolio.
     """
+    found: list[str] = []
     for token in text.replace(",", " ").split():
         cleaned = token.strip("().:?!@#'\"")
         if not cleaned:
             continue
-        core = cleaned.replace("-", "").replace(".", "")
-        if 1 <= len(core) <= 6 and core.isalnum() and cleaned.upper() == cleaned \
+        core = cleaned.replace("-", "").replace(".", "").replace("=", "")
+        if 1 <= len(core) <= 8 and core.isalnum() and cleaned.upper() == cleaned \
                 and any(c.isalpha() for c in core):
-            return cleaned.upper()
-    return default
+            symbol = cleaned.upper()
+            if symbol not in found:
+                found.append(symbol)
+    return found or [default]
+
+
+def _symbol_for(text: str, default: str = "SPY") -> str:
+    """First ticker mentioned — kept for single-symbol callers."""
+    return _symbols_for(text, default)[0]
 
 
 class QuantRuntime:
@@ -98,14 +109,19 @@ class QuantRuntime:
         *,
         criteria: Optional[dict] = None,
         oos_fraction: float = 0.3,
-        commission: float = 0.001,
+        commission: Optional[float] = None,
+        base_currency: Optional[str] = None,
+        fx_rates: Optional[dict[str, float]] = None,
     ):
         self.hypotheses = registry
         self.loader = loader or SyntheticLoader()
         self.criteria = {**DEFAULT_CRITERIA, **(criteria or {})}
         self.oos_fraction = oos_fraction
+        # None = use each market's own cost convention (see quant/markets.py).
         self.commission = commission
-        # Per-task working state: task title → (hypothesis_id, symbol, family)
+        self.base_currency = base_currency
+        self.fx_rates = fx_rates
+        # Per-task working state: task title → {hypothesis_id, symbols, family, …}
         self._context: dict[str, dict] = {}
 
     # ------------------------------------------------------------------ #
@@ -117,6 +133,27 @@ class QuantRuntime:
     def _samples(self, symbol: str) -> tuple[Bars, Bars]:
         return split_period(self._bars(symbol), self.oos_fraction)
 
+    def _universe_samples(self, symbols: list[str]) -> tuple[dict[str, Bars], dict[str, Bars]]:
+        """In-sample / out-of-sample split for every symbol in the universe."""
+        ins: dict[str, Bars] = {}
+        oos: dict[str, Bars] = {}
+        for symbol in symbols:
+            a, b = self._samples(symbol)
+            ins[symbol], oos[symbol] = a, b
+        return ins, oos
+
+    def _evaluate(self, bars_or_universe, spec: SignalSpec):
+        """Backtest a single symbol or a portfolio, returning a result with `.summary()`."""
+        if isinstance(bars_or_universe, dict):
+            if len(bars_or_universe) == 1:
+                only = next(iter(bars_or_universe.values()))
+                return backtest(only, spec, commission=self.commission)
+            return backtest_portfolio(
+                bars_or_universe, spec,
+                base_currency=self.base_currency, fx_rates=self.fx_rates,
+            )
+        return backtest(bars_or_universe, spec, commission=self.commission)
+
     # ------------------------------------------------------------------ #
     # Planner
     # ------------------------------------------------------------------ #
@@ -127,9 +164,13 @@ class QuantRuntime:
         ctx = dict(self._context.get(req.task_title, {}))
         is_replan = bool(ctx)
 
-        symbol = ctx.get("symbol") or _symbol_for(text)
+        symbols = ctx.get("symbols") or _symbols_for(text)
+        symbol = symbols[0]
+        universe = ", ".join(symbols)
         family = ctx.get("family") or _family_for(text)
-        statement = f"{_family_for(text)} produces risk-adjusted edge on {symbol}"
+        venues = sorted({market_for(s).code for s in symbols})
+        scope = f"the {universe} portfolio" if len(symbols) > 1 else symbol
+        statement = f"{_family_for(text)} produces risk-adjusted edge on {scope}"
 
         needs_human = False
         risks: list[str] = []
@@ -139,7 +180,7 @@ class QuantRuntime:
         if not is_replan:
             try:
                 hypothesis = self.hypotheses.propose(
-                    agent=req.agent, statement=statement, universe=symbol,
+                    agent=req.agent, statement=statement, universe=universe,
                     rationale=f"proposed from task: {req.task_title}",
                 )
                 hypothesis_id = hypothesis.id
@@ -160,6 +201,9 @@ class QuantRuntime:
         ctx.update({
             "hypothesis_id": hypothesis_id,
             "symbol": symbol,
+            "symbols": symbols,
+            "universe": universe,
+            "venues": venues,
             "family": family,
         })
         self._context[req.task_title] = ctx
@@ -173,9 +217,22 @@ class QuantRuntime:
         ]
         if self.criteria.get("beat_benchmark"):
             criteria.append("Out-of-sample return beats buy & hold")
+        if len(venues) > 1:
+            # Cross-market work carries assumptions a single-venue backtest does not.
+            criteria.append(
+                f"Each venue's own conventions are applied ({'+'.join(venues)}: "
+                "annualisation, costs, settlement, shorting)"
+            )
+            currencies = sorted({market_for(s).currency for s in symbols})
+            if len(currencies) > 1:
+                criteria.append(
+                    f"Currencies {'+'.join(currencies)} are converted explicitly, not summed"
+                )
+                risks.append(f"cross-currency portfolio ({'+'.join(currencies)}) needs FX rates")
+            risks.append("venues keep different calendars — alignment is by date, not by row")
 
         steps = [
-            f"Search {family} parameters in-sample on {symbol}",
+            f"Search {family} parameters in-sample on {universe}",
             "Draft the research note with in-sample metrics and the signal spec",
         ]
         plan = Plan(
@@ -192,27 +249,34 @@ class QuantRuntime:
     # Builder — in-sample only
     # ------------------------------------------------------------------ #
     def build(self, req: RoleRequest) -> tuple[Artifact, int]:
-        ctx = self._context.get(req.task_title) or {
-            "symbol": _symbol_for(f"{req.task_title} {req.task_body}"),
-            "family": _family_for(f"{req.task_title} {req.task_body}"),
-            "hypothesis_id": "",
-        }
-        symbol, family = ctx["symbol"], ctx["family"]
-        in_sample, _oos = self._samples(symbol)
+        if not self._context.get(req.task_title):
+            syms = _symbols_for(f"{req.task_title} {req.task_body}")
+            self._context[req.task_title] = {
+                "symbol": syms[0], "symbols": syms, "universe": ", ".join(syms),
+                "family": _family_for(f"{req.task_title} {req.task_body}"),
+                "hypothesis_id": "",
+            }
+        ctx = self._context[req.task_title]
+        symbols = ctx.get("symbols") or [ctx["symbol"]]
+        universe = ctx.get("universe") or ctx["symbol"]
+        family = ctx["family"]
+        in_sample, _oos = self._universe_samples(symbols)
 
         attempt = 1 + sum(1 for v in req.prior_verdicts if v.step == req.step and not v.passed)
 
         # Step 2 is the write-up: summarise, do not re-fit.
         if req.step > 0 and ctx.get("best_spec"):
             spec = SignalSpec.from_dict(ctx["best_spec"])
-            result: BacktestResult = ctx["best_result"]
-            content = (
-                f"[{req.agent}] Research note — {spec.describe()} on {symbol}\n"
-                f"In-sample: {result.summary()}\n"
-                f"Hypothesis: {ctx.get('hypothesis_id') or '(unregistered)'}"
-            )
-            return Artifact(step=req.step, content=content,
-                            files=[f"research/{symbol}-{family}-note.md"],
+            result = ctx["best_result"]
+            lines = [
+                f"[{req.agent}] Research note — {spec.describe()} on {universe}",
+                f"In-sample: {result.summary()}",
+            ]
+            if hasattr(result, "attribution_lines"):
+                lines.append("Attribution: " + " | ".join(result.attribution_lines()))
+            lines.append(f"Hypothesis: {ctx.get('hypothesis_id') or '(unregistered)'}")
+            return Artifact(step=req.step, content="\n".join(lines),
+                            files=[f"research/{_slug(universe)}-{family}-note.md"],
                             notes=f"attempt {attempt}",
                             citations=_citations(ctx)), 0
 
@@ -234,10 +298,18 @@ class QuantRuntime:
         # Parameter search, strictly on the in-sample window.
         candidates = PARAM_GRID.get(family, PARAM_GRID["sma_cross"])
 
-        scored: list[tuple[float, SignalSpec, BacktestResult]] = []
+        scored: list[tuple[float, SignalSpec, object]] = []
         for params in candidates:
             spec = SignalSpec(type=family, params=dict(params))
-            res = backtest(in_sample, spec, commission=self.commission)
+            try:
+                res = self._evaluate(in_sample, spec)
+            except CurrencyMismatch as e:
+                # Refuse to invent an FX rate: report it as work a human must resolve.
+                return Artifact(
+                    step=req.step,
+                    content=f"[{req.agent}] Blocked: {e}",
+                    notes="cross-currency universe needs fx_rates",
+                ), 0
             scored.append((res.sharpe, spec, res))
         scored.sort(key=lambda x: x[0], reverse=True)
         best_sharpe, best_spec, best_result = scored[0]
@@ -250,17 +322,23 @@ class QuantRuntime:
             self.hypotheses.record_result(ctx["hypothesis_id"], "in_sample",
                                           best_spec.to_dict(), best_result)
 
+        venue_note = ""
+        if len(ctx.get("venues", [])) > 1:
+            venue_note = (f"\nVenues: {'+'.join(ctx['venues'])} — each with its own "
+                          f"annualisation, costs and settlement "
+                          f"({getattr(best_result, 'periods_per_year', '')} blended periods/yr).")
         content = (
-            f"[{req.agent}] Candidate: {best_spec.describe()} on {symbol}\n"
+            f"[{req.agent}] Candidate: {best_spec.describe()} on {universe}\n"
             f"In-sample ({best_result.start}→{best_result.end}): "
             f"CAGR {best_result.cagr:+.1%}, Sharpe {best_sharpe:.2f}, "
-            f"maxDD {best_result.max_drawdown:.1%}, trades {best_result.trades}\n"
+            f"maxDD {best_result.max_drawdown:.1%}\n"
             f"Searched {len(candidates)} parameter sets in the {family} family."
+            f"{venue_note}"
         )
         return Artifact(
             step=req.step,
             content=content,
-            files=[f"research/{symbol}-{family}-insample.json"],
+            files=[f"research/{_slug(universe)}-{family}-insample.json"],
             notes=f"attempt {attempt}",
             citations=_citations(ctx),
         ), 0
@@ -278,18 +356,23 @@ class QuantRuntime:
                            lessons=["Always attach the signal spec and its metrics"]), 0
 
         symbol = ctx["symbol"]
+        symbols = ctx.get("symbols") or [symbol]
+        universe = ctx.get("universe") or symbol
         spec = SignalSpec.from_dict(spec_dict)
-        _in_sample, oos = self._samples(symbol)
+        _in_sample, oos = self._universe_samples(symbols)
 
         reasons: list[str] = []
         lessons: list[str] = []
 
-        if len(oos) < self.criteria["min_bars"]:
+        shortest = min(len(b) for b in oos.values())
+        if shortest < self.criteria["min_bars"]:
+            thin = [s for s, b in oos.items() if len(b) < self.criteria["min_bars"]]
             reasons.append(
-                f"Only {len(oos)} out-of-sample bars, need {self.criteria['min_bars']}"
+                f"Only {shortest} out-of-sample bars for {', '.join(thin)}, "
+                f"need {self.criteria['min_bars']}"
             )
 
-        oos_result = backtest(oos, spec, commission=self.commission)
+        oos_result = self._evaluate(oos, spec)
         if ctx.get("hypothesis_id"):
             self.hypotheses.record_result(ctx["hypothesis_id"], "out_of_sample",
                                           spec_dict, oos_result)
@@ -301,7 +384,7 @@ class QuantRuntime:
                 f"{self.criteria['min_sharpe']} (in-sample was {in_sharpe:.2f})"
             )
             lessons.append(
-                f"{spec.describe()} did not survive out-of-sample on {symbol} — "
+                f"{spec.describe()} did not survive out-of-sample on {universe} — "
                 "in-sample parameter search overfits this family"
             )
         if oos_result.max_drawdown > self.criteria["max_drawdown"]:
@@ -309,7 +392,7 @@ class QuantRuntime:
                 f"Out-of-sample max drawdown {oos_result.max_drawdown:.1%} > "
                 f"{self.criteria['max_drawdown']:.0%}"
             )
-            lessons.append(f"Cap drawdown before proposing {spec.type} on {symbol}")
+            lessons.append(f"Cap drawdown before proposing {spec.type} on {universe}")
         if self.criteria.get("beat_benchmark") and \
                 oos_result.total_return <= oos_result.benchmark_return:
             reasons.append(
@@ -323,12 +406,12 @@ class QuantRuntime:
         exhausted = bool(reasons) and bool(ctx.get("families_exhausted"))
         if exhausted:
             reasons.append(
-                f"All {len(PARAM_GRID)} strategy families tried on {symbol} — "
+                f"All {len(PARAM_GRID)} strategy families tried on {universe} — "
                 "no out-of-sample edge found; this is a negative result, not a failure"
             )
             lessons.append(
                 f"No strategy family in the current grid shows out-of-sample edge on "
-                f"{symbol}; a new family or a different universe is needed"
+                f"{universe}; a new family or a different universe is needed"
             )
 
         if reasons:
@@ -345,7 +428,7 @@ class QuantRuntime:
                 f"OOS Sharpe {oos_result.sharpe:.2f}, maxDD {oos_result.max_drawdown:.1%}",
             )
         return Verdict(step=req.step, passed=True, reasons=[],
-                       lessons=[f"{spec.describe()} held up out-of-sample on {symbol} "
+                       lessons=[f"{spec.describe()} held up out-of-sample on {universe} "
                                 f"(Sharpe {oos_result.sharpe:.2f})"],
                        tester=req.agent), 0
 
@@ -371,10 +454,27 @@ class QuantRuntime:
         ctx = self._context.get(task_title, {})
         in_res = ctx.get("best_result")
         oos_res = ctx.get("oos_result")
+        symbols = ctx.get("symbols") or ([ctx["symbol"]] if ctx.get("symbol") else [])
         return {
             "task": task_title,
             "hypothesis_id": ctx.get("hypothesis_id", ""),
             "symbol": ctx.get("symbol", ""),
+            "symbols": symbols,
+            "universe": ctx.get("universe", ctx.get("symbol", "")),
+            # Cross-market provenance: which venue conventions produced these numbers.
+            "venues": ctx.get("venues") or [market_for(s).code for s in symbols],
+            "market_conventions": {
+                s: {
+                    "market": market_for(s).code,
+                    "currency": market_for(s).currency,
+                    "periods_per_year": market_for(s).periods_per_year,
+                    "round_trip_cost": market_for(s).round_trip_cost,
+                    "allows_short": market_for(s).allows_short,
+                }
+                for s in symbols
+            },
+            "base_currency": self.base_currency,
+            "fx_rates": self.fx_rates,
             "family": ctx.get("family", ""),
             "spec": ctx.get("best_spec", {}),
             "data_source": self.loader.name,
@@ -384,6 +484,11 @@ class QuantRuntime:
             "disclaimer": "Research output only. Not investment advice. No orders are "
                           "placed by this system.",
         }
+
+
+def _slug(universe: str) -> str:
+    """Filename-safe label for a universe ('SPY, BTC-USD' → 'SPY_BTC-USD')."""
+    return "_".join(s.strip().replace("/", "-") for s in universe.split(",") if s.strip())
 
 
 def _citations(ctx: dict) -> list[Citation]:

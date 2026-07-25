@@ -42,12 +42,17 @@ pytest
 ## Example: an AI quant research desk
 
 [docs/QUANT_TEAM_TUTORIAL.md](docs/QUANT_TEAM_TUTORIAL.md) builds a four-agent quant
-research team on top of the same loop, following the *Self-Improving Trading Agent* and
-*Multi-Agent Trading Teams* features of
+research team on top of the same loop, following the *Self-Improving Trading Agent*,
+*Multi-Agent Trading Teams*, and *Cross-Market Data & Backtesting* features of
 [HKUDS/Vibe-Trading](https://github.com/HKUDS/Vibe-Trading): agents propose hypotheses,
 search parameters in-sample, and a **different** agent re-runs them **out-of-sample** —
 so overfitting is caught by held-out data rather than by a reviewer's opinion. A
 hypothesis registry records what was tested and refuses to re-test a dead end.
+
+Research spans US, HK, China A-share, crypto and FX, each with its own calendar, costs,
+settlement and currency — so a crypto Sharpe is annualised with 365 rather than 252, an
+A-share strategy cannot short, and a portfolio mixing HKD with USD is **refused** unless
+you supply FX rates rather than being silently summed.
 
 It is research tooling only: no broker connectors, no order placement, and every note
 waits for a human to tap Approve.
