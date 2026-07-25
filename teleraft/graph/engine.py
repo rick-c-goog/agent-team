@@ -258,6 +258,13 @@ class GraphEngine:
         if verdict.passed:
             return "orchestrate"
 
+        if verdict.terminal:
+            # The Tester says no retry can succeed — escalate rather than burn budget.
+            reason = "; ".join(verdict.reasons) or "tester marked the result terminal"
+            self.notify("escalate", run_id=run_id, task_id=state.task_id, reason=reason)
+            raise Interrupt(run_id, Gate.REVIEW, state.task_id,
+                            {"reason": reason, "artifact": state.latest_artifact})
+
         used = state.retries.get(state.current_step, 0) + 1
         state.retries[state.current_step] = used
         if used <= state.budget.max_retries_per_step:

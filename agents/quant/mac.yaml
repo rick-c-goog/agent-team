@@ -1,0 +1,20 @@
+# Macro analyst — the "macro_team" seat: regime context for the desk's research.
+name: Mac
+role: member
+soul: souls/mac.md
+goals:
+  owns: ["macro", "regime", "# macro"]
+  escalate_when:
+    - "live trading"
+    - "real money"
+    - "place order"
+knowledge:
+  - type: file
+    uri: kb/quant/research-standards.md
+    scope: team
+heartbeat:
+  - cron: "30 7 * * 1-5"
+    prompt: "Summarise the current regime read and flag any hypothesis whose result depends on a single regime."
+runtime:
+  engine: quant
+  computer: vm-01

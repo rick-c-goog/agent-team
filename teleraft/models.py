@@ -147,6 +147,10 @@ class Verdict:
     reasons: list[str] = field(default_factory=list)
     lessons: list[str] = field(default_factory=list)
     tester: str = ""
+    # A Tester that knows no retry can succeed (the option space is exhausted, the
+    # request is impossible as stated) sets this so the Orchestrator escalates to a
+    # human immediately instead of burning the retry and replan budget.
+    terminal: bool = False
 
     @staticmethod
     def from_dict(d: dict[str, Any]) -> "Verdict":
@@ -156,6 +160,7 @@ class Verdict:
             reasons=list(d.get("reasons", [])),
             lessons=list(d.get("lessons", [])),
             tester=d.get("tester", ""),
+            terminal=bool(d.get("terminal", False)),
         )
 
 

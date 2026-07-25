@@ -17,8 +17,10 @@ from .agents.registry import Registry, load_agents_from_dir
 from .graph.engine import GraphEngine
 from .knowledge.service import KnowledgeService
 from .memory.service import MemoryService
+from .quant.hypothesis import HypothesisRegistry
 from .runtime.base import Runtime
 from .runtime.mock import MockRuntime
+from .runtime.quant import QuantRuntime
 from .storage import Storage
 from .tasks.service import TaskService
 from .telegram.client import MockTelegramClient, TelegramClient
@@ -50,9 +52,12 @@ class App:
         self.client = client or MockTelegramClient()
         self.human_ids = human_ids or {"rick"}
 
-        # One runtime per agent. Default: a shared deterministic mock.
-        shared_mock = MockRuntime()
-        self._runtime_for = runtime_for or (lambda agent: shared_mock)
+        # Quant research services (used when an agent declares `engine: quant`).
+        self.hypotheses = HypothesisRegistry(self.storage)
+
+        # One runtime per agent, chosen by the agent's declared engine. Default is the
+        # deterministic mock; `engine: quant` gets the backtest-driven QuantRuntime.
+        self._runtime_for = runtime_for or self._default_runtime_for(agent_configs)
 
         self.gateway = Gateway(
             client=self.client,
@@ -71,6 +76,7 @@ class App:
         )
         self.gateway.attach_engine(self.engine)
         self.gateway.attach_knowledge(self.knowledge)
+        self.gateway.attach_hypotheses(self.hypotheses)
 
         # Topics come from the agents that own them (plus the always-present catch-all).
         # A workspace with no agents yet has nothing but `general` — which is exactly
@@ -83,6 +89,22 @@ class App:
 
         # Register each agent's declared knowledge sources and do the first ingest.
         self.register_agent_knowledge(agent_configs, sync=sync_knowledge)
+
+    def _default_runtime_for(self, agent_configs):
+        """Map each agent to a runtime by its declared `runtime.engine`.
+
+        A workspace can mix engines: prose agents on the mock/Claude runtime and quant
+        agents on the backtest-driven QuantRuntime, all in the same channels and the
+        same loop (DESIGN.md §4 runtime model).
+        """
+        shared_mock = MockRuntime()
+        shared_quant = QuantRuntime(self.hypotheses)
+        engines = {cfg.name: cfg.runtime_engine for cfg in agent_configs}
+
+        def pick(agent: str) -> Runtime:
+            return shared_quant if engines.get(agent) == "quant" else shared_mock
+
+        return pick
 
     def register_agent_knowledge(self, agent_configs, sync: bool = True) -> list:
         """Register `knowledge:` entries from agent YAML; returns sync reports (§4.1)."""

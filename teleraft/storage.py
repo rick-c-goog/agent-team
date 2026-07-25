@@ -167,8 +167,37 @@ CREATE TABLE IF NOT EXISTS onboarding_session (
     updated_at REAL NOT NULL
 );
 
+-- Quant research: hypothesis registry (self-improving loop) --------------------
+CREATE TABLE IF NOT EXISTS hypothesis (
+    id TEXT PRIMARY KEY,
+    agent_name TEXT,
+    statement TEXT NOT NULL,
+    universe TEXT,
+    status TEXT NOT NULL,          -- proposed | testing | supported | invalidated | retired
+    rationale TEXT,
+    invalidated_reason TEXT,
+    parent_id TEXT,                -- research lineage: refinement of an earlier idea
+    task_id TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS backtest_result (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    hypothesis_id TEXT NOT NULL,
+    run_id TEXT,
+    sample TEXT NOT NULL,          -- in_sample | out_of_sample
+    spec_json TEXT NOT NULL,
+    symbol TEXT,
+    period_start TEXT,
+    period_end TEXT,
+    metrics_json TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_chunk_doc ON knowledge_chunk(doc_id);
 CREATE INDEX IF NOT EXISTS idx_doc_source ON knowledge_doc(source_id);
+CREATE INDEX IF NOT EXISTS idx_bt_hypothesis ON backtest_result(hypothesis_id);
 """
 
 
@@ -517,6 +546,58 @@ class Storage:
         return self.conn.execute(
             "SELECT * FROM onboarding_session WHERE id=?", (session_id,)
         ).fetchone()
+
+    # -- hypotheses & backtests (quant research) --------------------------- #
+    def add_hypothesis(self, hid: str, agent_name: str, statement: str, universe: str,
+                       rationale: str, parent_id: Optional[str], task_id: Optional[str]) -> None:
+        now = _now()
+        self.conn.execute(
+            "INSERT INTO hypothesis(id, agent_name, statement, universe, status, rationale,"
+            " invalidated_reason, parent_id, task_id, created_at, updated_at)"
+            " VALUES(?,?,?,?,'proposed',?,NULL,?,?,?,?)",
+            (hid, agent_name, statement, universe, rationale, parent_id, task_id, now, now),
+        )
+        self.conn.commit()
+
+    def get_hypothesis(self, hid: str) -> Optional[sqlite3.Row]:
+        return self.conn.execute("SELECT * FROM hypothesis WHERE id=?", (hid,)).fetchone()
+
+    def list_hypotheses(self, status: Optional[str] = None,
+                        agent_name: Optional[str] = None) -> list[sqlite3.Row]:
+        q, args = "SELECT * FROM hypothesis", []
+        clauses = []
+        if status:
+            clauses.append("status=?"); args.append(status)
+        if agent_name:
+            clauses.append("agent_name=?"); args.append(agent_name)
+        if clauses:
+            q += " WHERE " + " AND ".join(clauses)
+        return self.conn.execute(q + " ORDER BY created_at", args).fetchall()
+
+    def update_hypothesis(self, hid: str, **fields: Any) -> None:
+        if not fields:
+            return
+        fields["updated_at"] = _now()
+        cols = ", ".join(f"{k}=?" for k in fields)
+        self.conn.execute(f"UPDATE hypothesis SET {cols} WHERE id=?", (*fields.values(), hid))
+        self.conn.commit()
+
+    def add_backtest_result(self, hypothesis_id: str, run_id: Optional[str], sample: str,
+                            spec_json: str, symbol: str, period_start: str, period_end: str,
+                            metrics_json: str) -> None:
+        self.conn.execute(
+            "INSERT INTO backtest_result(hypothesis_id, run_id, sample, spec_json, symbol,"
+            " period_start, period_end, metrics_json, created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+            (hypothesis_id, run_id, sample, spec_json, symbol, period_start, period_end,
+             metrics_json, _now()),
+        )
+        self.conn.commit()
+
+    def backtests_for(self, hypothesis_id: str) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM backtest_result WHERE hypothesis_id=? ORDER BY id",
+            (hypothesis_id,),
+        ).fetchall()
 
     # -- topics ------------------------------------------------------------ #
     def upsert_topic(self, name: str, pillar: str = "") -> None:

@@ -71,12 +71,16 @@ class Gateway:
         self.group_chat_id = group_chat_id
         self.engine = None       # wired after construction (engine needs our notify hook)
         self.knowledge = None    # optional KnowledgeService for /kb commands
+        self.hypotheses = None   # optional HypothesisRegistry for /hyp commands
 
     def attach_engine(self, engine) -> None:
         self.engine = engine
 
     def attach_knowledge(self, knowledge) -> None:
         self.knowledge = knowledge
+
+    def attach_hypotheses(self, registry) -> None:
+        self.hypotheses = registry
 
     # ================================================================== #
     # Inbound
@@ -85,6 +89,8 @@ class Gateway:
         """Route a message. A mention/`as_task` becomes a task; a mentioned agent claims it."""
         if u.text.strip().startswith("/kb"):
             return self.handle_kb_command(u)
+        if u.text.strip().startswith("/hyp"):
+            return self.handle_hyp_command(u)
 
         agent_names = set(self.registry.names())
         mentioned_agents = [m for m in u.mentions if m in agent_names]
@@ -176,6 +182,55 @@ class Gateway:
         self.client.send_message(self.group_chat_id,
                                  "Usage: `/kb add|list|sync|remove`", thread=u.topic)
         return None
+
+    # -- /hyp — hypothesis registry (quant research) ----------------------- #
+    def handle_hyp_command(self, u: Update):
+        """`/hyp list [status]` · `/hyp show <id>` — the research board.
+
+        Read-only by design: hypotheses are created and killed by the research loop,
+        not by chat, so the registry stays an honest record of what was actually tested.
+        """
+        if self.hypotheses is None:
+            self.client.send_message(self.group_chat_id, "No hypothesis registry configured.")
+            return None
+
+        parts = u.text.strip().split()
+        sub = parts[1].lower() if len(parts) > 1 else "list"
+        args = parts[2:]
+
+        if sub == "show" and args:
+            try:
+                h = self.hypotheses.get(args[0])
+            except KeyError:
+                self.client.send_message(self.group_chat_id, f"Unknown hypothesis `{args[0]}`.",
+                                         thread=u.topic)
+                return None
+            lines = [h.short(), f"universe: {h.universe or '—'} · proposed by {h.agent or '—'}"]
+            if h.invalidated_reason:
+                lines.append(f"invalidated: {h.invalidated_reason}")
+            for r in h.results:
+                lines.append(
+                    f"  · {r.get('spec','?')} [{r.get('start','')}→{r.get('end','')}] "
+                    f"Sharpe {r.get('sharpe', 0):.2f}, maxDD {r.get('max_drawdown', 0):.1%}"
+                )
+            lineage = self.hypotheses.lineage(h.id)
+            if len(lineage) > 1:
+                lines.append("lineage: " + " → ".join(x.id for x in lineage))
+            self.client.send_message(self.group_chat_id, "\n".join(lines), thread=u.topic)
+            return h
+
+        status = args[0] if (sub == "list" and args) else None
+        rows = self.hypotheses.list(status=status)
+        if not rows:
+            text = "🔬 No hypotheses recorded yet."
+        else:
+            text = "\n".join(["🔬 *Hypothesis registry*"] + [
+                "  " + h.short() + (f"\n      ↳ {h.invalidated_reason}"
+                                    if h.invalidated_reason else "")
+                for h in rows
+            ])
+        self.client.send_message(self.group_chat_id, text, thread=u.topic)
+        return rows
 
     def _agent_for_topic(self, topic: str) -> Optional[str]:
         """Which agent owns a topic — used to scope `/kb add` and uploads."""

@@ -32,9 +32,25 @@ python -m teleraft.onboarding_demo
 # Watch one task go through the full loop:
 python -m teleraft.demo
 
+# Watch a quant research desk catch its own overfitting:
+python -m teleraft.quant_demo
+
 # Run the tests:
 pytest
 ```
+
+## Example: an AI quant research desk
+
+[docs/QUANT_TEAM_TUTORIAL.md](docs/QUANT_TEAM_TUTORIAL.md) builds a four-agent quant
+research team on top of the same loop, following the *Self-Improving Trading Agent* and
+*Multi-Agent Trading Teams* features of
+[HKUDS/Vibe-Trading](https://github.com/HKUDS/Vibe-Trading): agents propose hypotheses,
+search parameters in-sample, and a **different** agent re-runs them **out-of-sample** —
+so overfitting is caught by held-out data rather than by a reviewer's opinion. A
+hypothesis registry records what was tested and refuses to re-test a dead end.
+
+It is research tooling only: no broker connectors, no order placement, and every note
+waits for a human to tap Approve.
 
 The demo simulates a human handing a task to agent **Cole** in the `# content` topic,
 the graph engine planning it, a Builder drafting it, a *different* agent (**Ray**)
@@ -66,7 +82,8 @@ python -m teleraft.main                # long-polls Telegram
 | §7 Data model | [`teleraft/storage.py`](teleraft/storage.py) |
 | §2/§3 Telegram gateway | [`teleraft/telegram/`](teleraft/telegram/gateway.py) |
 | §5.2 Learn / self-improvement | [`teleraft/memory/service.py`](teleraft/memory/service.py) |
-| Runtimes (Claude / mock) | [`teleraft/runtime/`](teleraft/runtime/base.py) |
+| Runtimes (Claude / mock / quant) | [`teleraft/runtime/`](teleraft/runtime/base.py) |
+| Quant research desk (example) | [`teleraft/quant/`](teleraft/quant/backtest.py), [`runtime/quant.py`](teleraft/runtime/quant.py), [`agents/quant/`](agents/quant/) |
 
 ## Architecture at a glance
 

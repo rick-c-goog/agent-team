@@ -655,7 +655,10 @@ interface Passage { source_id: string; doc: string; locator: string; text: strin
   "fails criterion 3: claims a stat with no source", "citation says tier is $49, draft
   says $39."
 - **Replan** — Planner revises with accumulated verdicts as context; more than 2
-  replans → escalate to a human in-thread.
+  replans → escalate to a human in-thread. A Tester that knows no retry can succeed —
+  the option space is exhausted, or the request is impossible as stated — sets
+  `terminal` on its verdict and the Orchestrator escalates immediately rather than
+  burning the remaining retry and replan budget.
 - **HumanReview** — the Raft "In Review" gate. The artifact (or diff/preview) posts
   to the task thread; only allow-listed human user IDs can Approve. **Nothing
   external-facing ships without passing this node.**

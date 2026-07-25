@@ -1,0 +1,22 @@
+# Risk officer — the "risk_committee" seat.
+name: Robin
+role: admin
+soul: souls/robin.md
+goals:
+  owns: ["risk", "drawdown", "# risk"]
+  escalate_when:
+    - "live trading"
+    - "real money"
+    - "place order"
+    - "leverage"
+    - "capital allocation"
+knowledge:
+  - type: file
+    uri: kb/quant/risk-limits.md
+    scope: team
+heartbeat:
+  - cron: "0 17 * * 1-5"
+    prompt: "Review today's supported hypotheses against the risk limits and flag anything breaching drawdown or exposure caps."
+runtime:
+  engine: quant
+  computer: vm-01

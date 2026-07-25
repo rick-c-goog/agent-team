@@ -1,0 +1,19 @@
+# Backtester / validation — the adversarial reviewer of the quant desk.
+name: Bailey
+role: member
+soul: souls/bailey.md
+goals:
+  owns: ["backtesting", "validation", "# backtest"]
+  escalate_when:
+    - "live trading"
+    - "real money"
+    - "place order"
+    - "capital allocation"
+knowledge:
+  - type: file
+    uri: kb/quant/research-standards.md
+    scope: team
+heartbeat: []
+runtime:
+  engine: quant
+  computer: vm-01
