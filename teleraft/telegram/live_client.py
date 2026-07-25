@@ -21,6 +21,44 @@ from typing import Optional
 from .client import Button
 
 
+def _explain(method: str, params: dict, data: dict) -> str:
+    """Turn a terse Bot API error into one that names the likely misconfiguration.
+
+    `chat not found` in particular is almost never a Telegram problem — it means the
+    chat id being sent is not the one the bot belongs to.
+    """
+    description = str(data.get("description", ""))
+    base = f"Telegram API {method} failed: {data}"
+    lowered = description.lower()
+
+    if "chat not found" in lowered:
+        chat_id = params.get("chat_id")
+        hint = (
+            f"\n  → chat_id={chat_id!r} is not a chat this bot can post to. Check:\n"
+            "    1. `group_chat_id` in teleraft.toml / TELERAFT_GROUP_CHAT_ID is the\n"
+            "       supergroup id (a large negative number like -1001234567890),\n"
+            "       not a name — read it from getUpdates (TELEGRAM_SETUP.md §6.2).\n"
+            "    2. The bot has been added to that group.\n"
+            "    3. For a channel, the bot is an admin with Post Messages rights."
+        )
+        if isinstance(chat_id, str) and not chat_id.lstrip("-").isdigit() \
+                and not chat_id.startswith("@"):
+            hint += (f"\n    Note: {chat_id!r} is neither a numeric id nor an @handle, "
+                     "so it can never resolve.")
+        return base + hint
+
+    if "not enough rights" in lowered or "have no rights" in lowered:
+        return base + ("\n  → the bot lacks permission in this chat. Promote it to admin "
+                       "(Manage Topics / Post Messages) — TELEGRAM_SETUP.md §4.")
+    if "message thread not found" in lowered:
+        return base + ("\n  → a `topic_threads` id is stale. Re-read each topic's "
+                       "message_thread_id from getUpdates (TELEGRAM_SETUP.md §6.2).")
+    if "unauthorized" in lowered:
+        return base + ("\n  → the bot token is wrong or has been revoked. "
+                       "Reissue it in BotFather and update TELERAFT_BOT_TOKEN.")
+    return base
+
+
 class LiveTelegramClient:
     API = "https://api.telegram.org"
 
@@ -53,7 +91,7 @@ class LiveTelegramClient:
         resp = self._http.post(url, json={k: v for k, v in params.items() if v is not None})
         data = resp.json()
         if not data.get("ok", False):
-            raise RuntimeError(f"Telegram API {method} failed: {data}")
+            raise RuntimeError(_explain(method, params, data))
         return data["result"]
 
     @staticmethod
@@ -119,6 +157,49 @@ class LiveTelegramClient:
 
     def get_me(self) -> dict:
         return self._call("getMe")
+
+    def get_chat(self, chat_id: str) -> dict:
+        return self._call("getChat", chat_id=chat_id)
+
+    def preflight(self) -> list[str]:
+        """Validate the live configuration before polling starts.
+
+        Returns a list of human-readable problems (empty when healthy). Checking at
+        startup turns a confusing per-message traceback into one clear message while
+        the operator is still looking at the terminal.
+        """
+        problems: list[str] = []
+        try:
+            me = self.get_me()
+        except RuntimeError as e:
+            return [f"bot token rejected: {e}"]
+
+        if not self.group_chat_id:
+            problems.append("group_chat_id is not set — the bot has nowhere to post")
+        else:
+            try:
+                chat = self.get_chat(self.group_chat_id)
+                if chat.get("type") not in ("group", "supergroup"):
+                    problems.append(
+                        f"group_chat_id {self.group_chat_id!r} is a "
+                        f"{chat.get('type')!r}, expected a group/supergroup"
+                    )
+                elif not chat.get("is_forum") and self.topic_threads:
+                    problems.append(
+                        "topic_threads is configured but the group does not have Topics "
+                        "enabled (Group → Edit → Topics) — messages will ignore threads"
+                    )
+            except RuntimeError as e:
+                problems.append(f"group chat unreachable: {e}")
+
+        if self.channel_id:
+            try:
+                self.get_chat(self.channel_id)
+            except RuntimeError as e:
+                problems.append(f"broadcast channel unreachable: {e}")
+
+        self._me = me
+        return problems
 
     def close(self) -> None:
         self._http.close()

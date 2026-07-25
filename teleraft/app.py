@@ -41,6 +41,7 @@ class App:
         runtime_for: Optional[Callable[[str], Runtime]] = None,
         knowledge_root: str = DEFAULT_KNOWLEDGE_ROOT,
         sync_knowledge: bool = True,
+        group_chat_id: str = "",
     ):
         self.storage = Storage(db_path)
         self.registry = Registry(self.storage)
@@ -65,6 +66,7 @@ class App:
             tasks=self.tasks,
             registry=self.registry,
             human_ids=self.human_ids,
+            group_chat_id=group_chat_id,
         )
         self.engine = GraphEngine(
             storage=self.storage,

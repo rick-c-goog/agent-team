@@ -61,7 +61,11 @@ class Gateway:
         tasks,
         registry,
         human_ids: set[str],
-        group_chat_id: str = "workspace",
+        # Empty by default on purpose: an unset chat id falls through to the client's
+        # own configured chat (LiveTelegramClient does `chat_id or self.group_chat_id`).
+        # A non-empty placeholder here would be sent to Telegram verbatim and fail with
+        # "chat not found" — which is exactly what a sentinel like "workspace" did.
+        group_chat_id: str = "",
     ):
         self.client = client
         self.storage = storage

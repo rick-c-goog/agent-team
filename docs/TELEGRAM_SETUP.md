@@ -292,7 +292,18 @@ source .venv/bin/activate
 python -m teleraft.main
 ```
 
-You should see:
+On startup it runs a **preflight check** against the Bot API — token valid, group
+reachable, group is a forum if you configured topics, broadcast channel postable. If
+anything is wrong it prints the problems and exits rather than failing later on your
+first message:
+
+```
+ERROR preflight: group chat unreachable: Telegram API getChat failed: … chat not found
+  → chat_id='-1001234567890' is not a chat this bot can post to. Check: …
+SystemExit: Telegram configuration is not usable — fix the problems above
+```
+
+When healthy you should see:
 
 ```
 … teleraft.runner TeleRaft runner online as @MyTeam_TeleRaft_Bot; polling…
@@ -467,6 +478,7 @@ Also read from the environment: `ANTHROPIC_API_KEY` (when `runtime_engine=claude
 
 | Symptom | Cause / fix |
 |---|---|
+| `Bad Request: chat not found` on send | The chat id being sent is not one the bot can post to. The error now prints the offending `chat_id` and what to check: `group_chat_id` must be the numeric supergroup id (`-100…`, from `getUpdates` §6.2), and the bot must be in that group. Startup preflight catches this before polling. |
 | Bot ignores messages in the group | Privacy mode still **on** (§3.2), or the bot isn't in the group. Disable privacy, then **remove and re-add** the bot so it takes effect. |
 | `@Cole` doesn't start a task | Agent name/username not in `agent_usernames`, or the agent YAML isn't loaded. The runner also matches a bare `@Cole` to a display name — check spelling/case. |
 | Tasks land in the wrong topic / all in *general* | `topic_threads` ids don't match reality. Re-read `message_thread_id` from `getUpdates` (§6.2). |

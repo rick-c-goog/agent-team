@@ -39,6 +39,16 @@ def main() -> None:
         channel_id=cfg.channel_id,
         topic_threads=cfg.topic_threads,
     )
+
+    # Fail loudly at startup rather than on the first inbound message.
+    problems = client.preflight()
+    if problems:
+        for problem in problems:
+            logging.error("preflight: %s", problem)
+        raise SystemExit(
+            "Telegram configuration is not usable — fix the problems above "
+            "(see docs/TELEGRAM_SETUP.md §6 and §16) and restart."
+        )
     app = App(
         db_path=cfg.db_path,
         agents_dir=cfg.agents_dir,
@@ -47,6 +57,7 @@ def main() -> None:
         runtime_for=build_runtime_factory(cfg),
         knowledge_root=cfg.knowledge_root,
         sync_knowledge=cfg.sync_knowledge_on_start,
+        group_chat_id=cfg.group_chat_id,
     )
     for report in app.knowledge.health():
         if report["status"] == "error":
