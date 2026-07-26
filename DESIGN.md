@@ -732,64 +732,112 @@ Program, TeleRaft calls a heartbeat-triggered run over a checkpointed graph. Wha
 genuinely missing is the **chaining** — a way to say that an item must pass stage 1
 before stage 2 sees it, with each stage a full loop in its own right.
 
-#### 5.4.2 The Pipeline abstraction
+#### 5.4.2 The graph abstraction: four kinds of node
+
+A linear list of stages is not enough. Real research graphs fan out to build several
+things in parallel, gate each independently, then **join** the survivors into one object
+and judge *that*. So a pipeline is a DAG over four node kinds:
 
 ```
-Pipeline := ordered list of Stages
-Stage    := { name, owner_agent, checker_agent, criteria, on_pass, on_fail }
+Pipeline := DAG of Nodes
+Node     := { name, kind, owner_agent, checker_agent, criteria, inputs[], outputs[] }
+kind     := producer     # builds an artifact (fan-out; no gate)
+          | gate         # judges ONE item; may kill it
+          | join         # consumes ALL survivors; produces one aggregate
+          | aggregate_gate  # judges the aggregate, not its parts
 ```
+
+The distinction that matters is **gate vs join**. A gate is per-item and parallel: item A
+can be at gate 2 while item B is still at gate 1. A join is a genuine barrier — it cannot
+start until every upstream item has passed or died, because its input *is* the surviving
+set. Conflating the two either serializes work that should be parallel, or starts an
+aggregation on a partial set, which silently changes the answer.
 
 Three rules give the abstraction its value:
 
-1. **A stage is a POBT run.** Not a function call — a full Planner/Orchestrator/Builder/
+1. **A node is a POBT run.** Not a function call — a full Planner/Orchestrator/Builder/
    Tester loop, with its own acceptance criteria, its own adversarial checker, its own
-   checkpoint, and its own audit trail. A stage can therefore be re-run, resumed, or
+   checkpoint, and its own audit trail. A node can therefore be re-run, resumed, or
    escalated to a human exactly like any other unit of work.
-2. **Any stage can terminate the item.** A failing gate does not retry forever; it
+2. **Any gate can terminate the item.** A failing gate does not retry forever; it
    records *why* and kills the item, which is what makes the funnel a filter rather than
    a queue. This is the `terminal` verdict from §5.2, used deliberately.
-3. **The handoff is typed and recorded.** Stage *n*'s artifact is stage *n+1*'s input,
-   and both are persisted, so any conclusion can be traced back through every gate it
-   passed.
+3. **The handoff is typed and recorded.** A node's artifact is the next node's input, and
+   both are persisted, so any conclusion can be traced back through every gate it passed.
 
-```mermaid
-flowchart LR
-    I[Item enters] --> S1
-    subgraph S1["Stage 1 · POBT run"]
-        P1[Plan] --> B1[Build] --> T1[Test]
-    end
-    S1 -->|pass| S2
-    S1 -->|fail| K1[(killed · reason recorded)]
-    subgraph S2["Stage 2 · POBT run"]
-        P2[Plan] --> B2[Build] --> T2[Test]
-    end
-    S2 -->|pass| S3[…further stages…]
-    S2 -->|fail| K2[(killed · reason recorded)]
-    S3 -->|survives every gate| H[Human review]
-```
+A fourth rule falls out of the producer/gate split, and is easy to get wrong:
+
+4. **A killed item's *artifacts* may still be needed.** A producer emits more than the
+   thing being judged. In §5.4.3, node 1 emits both a market-beta *factor* (which a gate
+   may kill) and a per-stock *beta estimate* that node 10 needs for beta-neutralisation
+   regardless. Killing the factor must not delete the estimate, so survival is a property
+   of the **item**, not of every artifact the node produced.
 
 Nothing here is quant-specific: the same shape fits a hiring funnel, a compliance review,
 or a content pipeline. §5.4.3 is the worked example that motivated it.
 
-#### 5.4.3 Worked example: the six-stage alpha pipeline
+#### 5.4.3 Worked example: the eleven-node factor graph
 
-Each stage has a **maker** and a **checker**, and they are different agents (§5.1). A
-stage that passes hands its artifact forward; a stage that fails invalidates the
-hypothesis in the registry with its reason (§4.1-equivalent for research: the hypothesis
-registry), which is what stops the desk re-testing it tomorrow.
+The graph below is the one this design is built to express. Every node has a **maker**
+and a **checker**, and they are different agents (§5.1).
 
-| # | Stage | Maker produces | Gate the checker applies |
+**Producers — nodes 1–7, fan out in parallel.** Each owns one factor and one job:
+
+| # | Node | Computes | Emits |
 |---|---|---|---|
-| 1 | **Idea** | A falsifiable hypothesis with a named universe, direction, and the source it came from | Is it falsifiable, in scope, and not already invalidated? |
-| 2 | **Features** | The feature vector: cross-sectionally standardized, outliers handled, point-in-time correct | Any lookahead? Any survivorship? Are missing values handled, not dropped silently? |
-| 3 | **Backtest** | Portfolio-level result with realistic costs, turnover, capacity | Do the mechanics hold — lag applied, costs charged, enough bars to conclude? |
-| 4 | **Validation** | Significance statistics on the return series | Newey–West t-stat, bootstrap distribution, and **in-sample vs out-of-sample degradation** within tolerance |
-| 5 | **Regime** | Per-regime performance across a volatility/return segmentation | Does it work in more than one regime, or is it regime timing wearing a costume? |
-| 6 | **Attribution** | Regression of the signal against known factors | Is there residual alpha after the factors are removed, or is this a repackaged factor? |
+| 1 | Market Beta | Rolling 60-month regression per stock | `MKT` factor **and** a per-stock beta estimate (needed by node 10 even if the factor dies) |
+| 2 | Size | Sort by market cap | `SMB` — small-minus-big spread |
+| 3 | Value | Sort by book-to-market | `HML` — high-minus-low spread |
+| 4 | Momentum | 12-minus-1-month return | `MOM` — decile spread |
+| 5 | Profitability | Gross profitability | `RMW` |
+| 6 | Investment | Annual asset growth | `CMA` |
+| 7 | Low Volatility | Trailing 60-day realized vol | `LVOL` — decile spread |
 
-The ordering is deliberate and cheap-first: stage 3 is expensive, so stages 1–2 kill the
-obviously-doomed before it runs; stages 4–6 are the ones that kill the *plausible* ones,
-which is where most of the value is.
+**Coordinators — nodes 8–11, in sequence**, but note the differing node *kinds*:
+
+| # | Node | Kind | What it does | Outcome |
+|---|---|---|---|---|
+| 8 | Validator | **gate** (per factor) | Newey–West adjusted t-statistics; bootstrap resample 10,000 iterations; IS-vs-OOS degradation | Kills any factor degrading beyond tolerance |
+| 9 | Regime Auditor | **gate** (per factor) | Segments ~20 years into three regimes (HMM on volatility and returns); recomputes per regime | Kills anything that works in only one regime |
+| 10 | Portfolio Constructor | **join** (barrier) | Combines **all surviving** factors into a long/short portfolio with risk-parity weights; enforces sector, beta and dollar neutrality | One portfolio |
+| 11 | Risk Decomposer | **aggregate_gate** | Regresses the portfolio against benchmark factors plus style and macro | Residual alpha and its t-statistic |
+
+```mermaid
+flowchart LR
+    subgraph P["Producers · parallel"]
+        N1[1 Beta]
+        N2[2 Size]
+        N3[3 Value]
+        N4[4 Momentum]
+        N5[5 Profitability]
+        N6[6 Investment]
+        N7[7 Low Vol]
+    end
+    N1 & N2 & N3 & N4 & N5 & N6 & N7 --> N8[8 Validator · gate]
+    N8 -->|survives| N9[9 Regime Auditor · gate]
+    N8 -->|killed| K[(dead · reason recorded)]
+    N9 -->|survives| N10[10 Portfolio Constructor · JOIN]
+    N9 -->|killed| K
+    N1 -. per-stock betas .-> N10
+    N10 --> N11[11 Risk Decomposer · aggregate gate]
+    N11 --> H[Human review]
+```
+
+Three structural properties this graph forces, which a linear pipeline hides:
+
+- **Nodes 8 and 9 are per-factor and parallel.** Momentum can be at node 9 while value is
+  still at node 8. Serializing them buys nothing.
+- **Node 10 is a true barrier.** Risk parity weights depend on the covariance of the
+  *surviving set*; starting it early produces a different portfolio, not an earlier one.
+- **Node 10 also consumes node 1's beta estimates directly**, bypassing the gates —
+  the artifact-survives-the-item rule from §5.4.2.
+
+**Zero survivors is a designed outcome, not an error.** Nodes 8 and 9 together are a
+severe filter, and applied honestly to published factors they will sometimes kill all of
+them — value has endured decade-long out-of-sample droughts, momentum crashes in
+identifiable regimes. Node 10 must therefore handle an empty surviving set by reporting
+"no factor survived, here is what killed each", which is a *finding*. A pipeline that
+cannot return nothing will eventually be tuned until it returns something.
 
 #### 5.4.4 The statistical gates, and the one the source material misses
 
@@ -825,19 +873,85 @@ is a much faster way to overfit.
 > Design rule: **the trial count is part of the evidence.** A result reported without the
 > number of hypotheses that preceded it is incomplete.
 
-#### 5.4.5 Concurrency: pipeline, not barrier
+#### 5.4.5 Concurrency: parallel gates, and the two legitimate barriers
 
-Stages are ordered *per item*, not globally. Hypothesis A can be at stage 5 while
-hypothesis B is still at stage 2. Requiring every item to clear stage *n* before any
-item starts stage *n+1* would idle the desk behind its slowest idea, for no benefit —
-the stages share no cross-item state except the registry, and the registry is designed
-for concurrent appends.
+Gates are ordered *per item*, not globally. Momentum can be at node 9 while value is
+still at node 8. Requiring every item to clear a gate before any item advances would idle
+the desk behind its slowest factor for no benefit.
 
-The exception is the multiple-testing correction (§5.4.4), which is *inherently*
-cross-item: it must see the batch. It therefore runs as a **synthesis step over a
-completed round**, not as a per-item stage — the one place a barrier is correct.
+Exactly two things justify a barrier, and both appear in §5.4.3:
 
-#### 5.4.6 State: the registry is the Program's memory
+1. **A join** (node 10). Its input *is* the surviving set, and risk-parity weights depend
+   on the covariance across survivors. Running it on a partial set yields a different
+   portfolio, not an earlier one.
+2. **The multiple-testing correction** (§5.4.4), which is inherently cross-item: it must
+   see the batch to know the trial count. It runs as a synthesis step over a completed
+   round.
+
+Anything else that looks like it needs a barrier — flattening, filtering, reformatting —
+belongs inside a node.
+
+#### 5.4.6 What the attribution node can and cannot prove
+
+Node 11 asks the question the whole graph exists to answer: *is this new?* Getting it
+wrong is easy and quiet, so the design is explicit about two failure modes.
+
+**Do not regress a portfolio against the factors it is built from.** Node 10 constructs
+the portfolio as a weighted combination of the surviving factors. If node 11 then
+regresses that portfolio on those same seven factors, the regressors span the portfolio
+by construction: R² approaches 1 and residual alpha approaches 0 *as arithmetic*, not as
+a finding. The result would be identical for a brilliant portfolio and a worthless one.
+
+The fix is to regress against **independently constructed benchmark factors** — published
+series such as Fama–French RMW/CMA/HML/SMB, Carhart momentum, a betting-against-beta
+series — sourced externally rather than rebuilt by nodes 1–7. Then "residual alpha" means
+what it should: *not explained by factors the world already knows about*. The design
+records the benchmark's provenance alongside the alpha, because the claim is only as
+strong as the benchmark it is measured against.
+
+**Be accurate about what this graph is.** Nodes 1–7 construct beta, size, value,
+momentum, profitability, investment and low-volatility — which are, precisely, the
+Fama–French five plus momentum plus BAB. These are the canonical published factors, not
+novel signals. A portfolio of known factors has, by definition, close to zero alpha
+*relative to those factors*; that is what "known factor" means.
+
+So this graph is a **factor replication, portfolio construction and risk attribution
+system**, and it is a genuinely useful one — it will tell you whether your implementation
+of value matches the literature's, how the premia behaved across regimes, and what a
+neutralised risk-parity combination of them looks like. Calling that *alpha discovery*
+misdescribes it. Alpha discovery is what happens when node 11's input is a signal that is
+**not** in the benchmark set; the graph supports that, but only if a candidate signal is
+introduced as an eighth producer and the benchmark stays external.
+
+#### 5.4.7 Data the graph actually requires
+
+Four of the seven producers cannot be computed from prices, and this is the practical
+obstacle that decides whether the graph is buildable at all:
+
+| Node | Needs | Why it is hard |
+|---|---|---|
+| 3 Value | Book equity | Point-in-time, lagged to public availability |
+| 5 Profitability | Revenue, COGS, assets | Same, plus consistent definitions across restatements |
+| 6 Investment | Total assets, year over year | Same |
+| 10 Neutrality | Sector classification | A mapping that itself changes over time |
+| 11 Attribution | External benchmark factor returns | Must not be self-constructed (§5.4.6) |
+
+Two rules follow:
+
+- **Point-in-time or nothing.** Fundamentals as *currently reported* embed restatements
+  the market did not have. Using them is look-ahead bias that no downstream gate can
+  detect, because the resulting backtest is internally consistent and simply wrong. A
+  fundamentals source without as-of semantics fails the gate rather than proceeding.
+- **Survivorship.** A universe assembled from today's listed names has already dropped the
+  failures. The universe must be as-of the rebalance date, delistings included, with the
+  delisting return applied.
+
+Our current implementation is price-only (§ the quant tutorial). Nodes 3, 5 and 6 are
+therefore **not buildable** until a point-in-time fundamentals source is configured, and
+the design's answer is that they report `cannot_evaluate` and block rather than
+approximating with what is available.
+
+#### 5.4.8 State: the registry is the Program's memory
 
 Slate's Programs "hold state between runs"; here that state is explicit and queryable
 rather than in-process:
@@ -851,7 +965,7 @@ rather than in-process:
 Because this state is durable, a pipeline can be stopped, redeployed, and resumed, and
 its conclusions remain auditable after the process that produced them is long gone.
 
-#### 5.4.7 What is honest to claim
+#### 5.4.9 What is honest to claim
 
 The source architecture cites thresholds — out-of-sample Sharpe above 1.5, drawdown of
 5–8%, t-statistic above 2.5. These are configurable in our design and **deliberately not
@@ -960,14 +1074,19 @@ knowledge_chunk(id, doc_id, seq, text, locator /*"p.12", "# Brand > ## Tone", "r
 citation(id, run_id, step, chunk_id, quote, created_at)   -- what the Builder actually cited
 
 -- §5.4 Staged pipelines ------------------------------------------------------
-pipeline(id, workspace_id, name, stages_json /*ordered stage specs*/, enabled,
+pipeline(id, workspace_id, name, graph_json /*nodes + edges + kinds*/, enabled,
          created_at)
-pipeline_item(id, pipeline_id, subject_ref /*e.g. hypothesis id*/, stage_index,
-              status /*running|passed|killed|blocked|graduated*/, killed_at_stage?,
-              kill_reason?, created_at, updated_at)
-stage_run(id, item_id, stage_index, stage_name, run_id /*the POBT run*/,
-          verdict /*pass|fail|cannot_evaluate*/, reasons_json, artifact_ref,
-          started_at, finished_at)
+pipeline_node(id, pipeline_id, name, kind /*producer|gate|join|aggregate_gate*/,
+              owner_agent, checker_agent, criteria_json, depends_on_json)
+pipeline_item(id, pipeline_id, subject_ref /*e.g. a factor or hypothesis id*/,
+              current_node, status /*running|passed|killed|blocked|graduated*/,
+              killed_at_node?, kill_reason?, created_at, updated_at)
+node_run(id, item_id?, node_id, run_id /*the POBT run*/,
+         verdict /*pass|fail|cannot_evaluate*/, reasons_json, artifact_ref,
+         started_at, finished_at)          -- item_id NULL for join/aggregate nodes
+-- Artifacts outlive the item that produced them: node 1's per-stock betas are needed
+-- by the portfolio join even when the market factor itself was killed (§5.4.2 rule 4).
+artifact(id, node_run_id, name, kind, payload_ref, created_at)
 -- Every test ever run, so significance can be corrected for trial count (§5.4.4).
 trial(id, pipeline_id, subject_ref, stage_name, statistic REAL, p_value REAL,
       created_at)
@@ -1072,9 +1191,12 @@ for Hermes Agent and OpenClaw; heartbeats registered via `schedule()`; the inter
 `workspace.plan.yaml` → approve → idempotent apply flow, run as a real POBT graph run
 with the Tester verifying the provisioned workspace.
 
-**Phase 5b — Staged pipelines (wk 12–13).** The `Pipeline`/`Stage` abstraction over
-existing runs (§5.4.2): typed handoff, per-stage criteria and checker, terminal kill with
-recorded reason, resumable mid-pipeline. Then the statistical gates as ordinary reviewed
+**Phase 5b — Staged pipelines (wk 12–13).** The pipeline DAG over existing runs
+(§5.4.2): four node kinds, typed handoff, per-node criteria and checker, terminal kill
+with recorded reason, artifacts that outlive killed items, resumable mid-graph. The
+join node's barrier semantics and the empty-surviving-set path are part of this phase,
+not afterthoughts — a portfolio constructor that cannot return "nothing survived" will be
+tuned until it never has to. Then the statistical gates as ordinary reviewed
 code — Newey–West standard errors, bootstrap resampling, IS/OOS degradation, a regime
 segmentation, factor attribution — each of which **blocks rather than passes** when its
 inputs are unavailable. The trial ledger and the trials-aware correction (§5.4.4) land
@@ -1138,6 +1260,15 @@ The Tester *role* checks agent output; this section is about testing the *system
   "discoveries" and approximately zero after the trials-aware correction — the property
   that distinguishes a research pipeline from a random number generator with good
   manners.
+- **Attribution is not self-referential** (§5.4.6): regressing the constructed portfolio
+  against the factors it was built from must be *rejected by the design*, not merely
+  discouraged — a test asserts that the benchmark set and the construction set are
+  disjoint, because the vacuous version returns a plausible number.
+- **Point-in-time discipline** (§5.4.7): a fundamentals source without as-of semantics
+  must yield `cannot_evaluate`; a universe that excludes delisted names must be detected
+  rather than silently producing a survivorship-inflated result.
+- **Empty survivor set**: with every factor killed, the join must report what killed each
+  and produce no portfolio — never an unweighted or partial one.
 - **Chaos**: kill the daemon mid-Build, drop webhooks, expire a runtime session —
   every run must resume or escalate, never silently die.
 
@@ -1240,10 +1371,18 @@ These limits are part of the design, not advice layered on top:
 13. **Regime segmentation method** — a hidden Markov model is the literature's answer and
     is expensive and fiddly; volatility terciles are transparent and crude. Start crude
     and state the crudeness, or start with the HMM?
-14. **Stage granularity** — six stages is the source's decomposition, not a law. Would
-    features-and-backtest as one stage lose anything, given a stage's real cost is a full
-    POBT run?
-15. **Pipelines beyond research** — the abstraction is domain-neutral (§5.4.2). Is a
+14. **Node granularity** — eleven nodes is the source's decomposition, not a law. One
+    factor per producer is clean but means seven near-identical POBT runs; is a single
+    parameterised producer over a factor list better, and does that cost the per-factor
+    audit trail?
+15. **Where do benchmark factors come from** (§5.4.6) — a published series keeps the
+    attribution honest but adds a licensing and availability dependency, and its universe
+    may not match ours. Do we require an exact-universe benchmark, or accept the mismatch
+    and report it?
+16. **What if all factors die** (§5.4.3) — the graph should report a well-argued nothing.
+    Does that reach the human as a normal result, or should a run of consecutive empty
+    portfolios trigger a review of the gates themselves rather than of the factors?
+17. **Pipelines beyond research** — the abstraction is domain-neutral (§5.4.2). Is a
     second worked example (a content or compliance funnel) worth carrying in the design,
     or does that dilute it?
 
