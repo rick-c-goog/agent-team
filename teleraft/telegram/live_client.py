@@ -152,6 +152,18 @@ class LiveTelegramClient:
         url = f"{self.API}/bot{self.token}/{method}"
         resp = self._http.post(url, json={k: v for k, v in params.items() if v is not None})
         data = resp.json()
+
+        # Formatting must never cost us the message. Agent output legitimately contains
+        # characters that look like markup ("[Quinn]", "hyp_a3b4"), so if the parser
+        # rejects the text, resend it verbatim as plain text and log the miss.
+        if not data.get("ok", False) and "can't parse entities" in \
+                str(data.get("description", "")).lower() and params.get("parse_mode"):
+            log.warning("%s: %s — resending as plain text",
+                        method, data.get("description"))
+            retry = {k: v for k, v in params.items() if k != "parse_mode"}
+            resp = self._http.post(url, json={k: v for k, v in retry.items() if v is not None})
+            data = resp.json()
+
         if not data.get("ok", False):
             hint_key = _hint_key or (
                 "channel_id" if str(params.get("chat_id")) == str(self.channel_id)
@@ -181,7 +193,7 @@ class LiveTelegramClient:
             "sendMessage",
             chat_id=chat_id or self.group_chat_id,
             text=text,
-            parse_mode="Markdown",
+            parse_mode="HTML",
             message_thread_id=self._thread_id(thread) if thread else None,
             reply_markup=self._keyboard(buttons),
         )
@@ -195,7 +207,7 @@ class LiveTelegramClient:
                 chat_id=chat_id or self.group_chat_id,
                 message_id=int(message_id),
                 text=text,
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 reply_markup=self._keyboard(buttons),
             )
         except RuntimeError as e:
@@ -211,7 +223,7 @@ class LiveTelegramClient:
         try:
             result = self._call("sendMessage", _hint_key="channel_id",
                                 chat_id=self.channel_id, text=text,
-                                parse_mode="Markdown")
+                                parse_mode="HTML")
         except RuntimeError as e:
             # Degrade, don't crash: work in the group must not fail because the
             # optional activity feed is misconfigured. Logged once, then disabled.

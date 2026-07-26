@@ -16,11 +16,33 @@ of truth. Every card carries a stable task_id / run_id so state reconciles.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from html import escape as _escape
+from typing import Any, Optional
 
 from ..models import TaskStatus
 from ..tasks.service import TaskConflict
 from .client import Button, TelegramClient
+
+def esc(value: Any) -> str:
+    """Escape dynamic content for Telegram's HTML parse mode.
+
+    Everything an agent produces — draft text, hypothesis statements, file paths, error
+    messages — is untrusted *as markup*. HTML mode needs only `&`, `<` and `>` escaped,
+    which is unambiguous; legacy Markdown had no reliable escape, so text like
+    `[Quinn] hyp_a3b4` was rejected outright with "can't parse entities".
+    """
+    return _escape(str(value), quote=False)
+
+
+def bold(value: Any) -> str:
+    """Bold, with the content escaped."""
+    return f"<b>{esc(value)}</b>"
+
+
+def mono(value: Any) -> str:
+    """Inline code, with the content escaped."""
+    return f"<code>{esc(value)}</code>"
+
 
 _STATUS_EMOJI = {
     "todo": "🟡",
@@ -148,15 +170,16 @@ class Gateway:
         return handle
 
     def _report_unknown_agent(self, u: Update, handle: str, agent_names: set[str]) -> None:
-        known = ", ".join(f"@{n}" for n in sorted(agent_names)) or "(none loaded)"
+        known = ", ".join(f"@{esc(n)}" for n in sorted(agent_names)) or "(none loaded)"
         text = (
-            f"🤷 I don't have an agent called `@{handle}`.\n"
+            f"🤷 I don't have an agent called {mono('@' + handle)}.\n"
             f"Agents in this workspace: {known}\n"
-            f"Use `/agents` for details, or `/task <what to do>` to open unclaimed work."
+            f"Use {mono('/agents')} for details, or {mono('/task <what to do>')} "
+            "to open unclaimed work."
         )
         if not agent_names:
-            text += ("\n⚠️ No agents are loaded at all — check `agents_dir` in "
-                     "teleraft.toml (a quant desk needs `agents/quant`).")
+            text += (f"\n⚠️ No agents are loaded at all — check {mono('agents_dir')} in "
+                     f"teleraft.toml (a quant desk needs {mono('agents/quant')}).")
         self.client.send_message(self.group_chat_id, text, thread=u.topic)
 
     # -- /agents · /help --------------------------------------------------- #
@@ -167,25 +190,26 @@ class Gateway:
         if not names:
             self.client.send_message(
                 self.group_chat_id,
-                "⚠️ No agents are loaded. Check `agents_dir` in teleraft.toml — "
-                "e.g. `agents/quant` for a quant desk.",
+                f"⚠️ No agents are loaded. Check {mono('agents_dir')} in teleraft.toml — "
+                f"e.g. {mono('agents/quant')} for a quant desk.",
                 thread=u.topic,
             )
             return []
 
-        lines = ["🤖 *Agents in this workspace*"]
+        lines = [bold("🤖 Agents in this workspace")]
         for name in sorted(names):
             goals = self.registry.goals(name) or {}
             owns = ", ".join(goals.get("owns", [])) or "—"
             role = self.registry.role(name)
-            lines.append(f"  *@{name}* ({role}) — owns: {owns}")
+            lines.append(f"  {bold('@' + name)} ({esc(role)}) — owns: {esc(owns)}")
             escalate = goals.get("escalate_when", [])
             if escalate:
-                lines.append(f"      escalates on: {', '.join(escalate)}")
+                lines.append(f"      escalates on: {esc(', '.join(escalate))}")
         lines += [
             "",
-            "*Commands*: `/task <what to do>` · `/agents` · `/kb list` · `/hyp list`",
-            "Address an agent directly: `@Name <what to do>`",
+            bold("Commands") + f": {mono('/task <what to do>')} · {mono('/agents')} "
+            f"· {mono('/kb list')} · {mono('/hyp list')}",
+            f"Address an agent directly: {mono('@Name <what to do>')}",
         ]
         self.client.send_message(self.group_chat_id, "\n".join(lines), thread=u.topic)
         return names
@@ -205,15 +229,17 @@ class Gateway:
         if sub == "list":
             rows = self.knowledge.health()
             if not rows:
-                text = "📚 No knowledge sources registered yet. Add one with `/kb add <url>`."
+                text = ("📚 No knowledge sources registered yet. Add one with "
+                        f"{mono('/kb add <url>')}.")
             else:
-                lines = ["📚 *Knowledge sources*"]
+                lines = [bold("📚 Knowledge sources")]
                 for r in rows:
                     mark = {"ok": "✅", "error": "❌"}.get(r["status"], "⏳")
-                    line = (f"{mark} `{r['id']}` {r['agent']} · {r['type']} · {r['uri']}"
+                    line = (f"{mark} {mono(r['id'])} {esc(r['agent'])} · "
+                            f"{esc(r['type'])} · {esc(r['uri'])}"
                             f" — {r['docs']} docs, {r['chunks']} chunks")
                     if r["error"]:
-                        line += f"\n     ⚠️ {r['error']}"
+                        line += f"\n     ⚠️ {esc(r['error'])}"
                     lines.append(line)
                 text = "\n".join(lines)
             self.client.send_message(self.group_chat_id, text, thread=u.topic)
@@ -222,7 +248,7 @@ class Gateway:
         if sub == "add":
             if not args:
                 self.client.send_message(self.group_chat_id,
-                                         "Usage: `/kb add <url|drive://…|path> [--team]`",
+                                         f"Usage: {mono('/kb add <url|drive://…|path> [--team]')}",
                                          thread=u.topic)
                 return None
             uri = args[0]
@@ -230,7 +256,8 @@ class Gateway:
             if agent is None and scope == "agent":
                 self.client.send_message(
                     self.group_chat_id,
-                    f"No agent owns topic {u.topic}; use `--team` or post in an agent's topic.",
+                    f"No agent owns topic {esc(u.topic)}; use {mono('--team')} or "
+                    "post in an agent's topic.",
                     thread=u.topic,
                 )
                 return None
@@ -240,28 +267,30 @@ class Gateway:
             )
             report = self.knowledge.sync_source(source_id)
             self.client.send_message(self.group_chat_id,
-                                     f"📚 {report.summary()}", thread=u.topic)
+                                     f"📚 {esc(report.summary())}", thread=u.topic)
             return report
 
         if sub == "sync":
             reports = ([self.knowledge.sync_source(args[0])] if args
                        else self.knowledge.sync_all(agent))
             body = "\n".join(r.summary() for r in reports) or "nothing to sync"
-            self.client.send_message(self.group_chat_id, f"📚 Sync:\n{body}", thread=u.topic)
+            self.client.send_message(self.group_chat_id, f"📚 Sync:\n{esc(body)}",
+                                     thread=u.topic)
             return reports
 
         if sub == "remove":
             if not args:
-                self.client.send_message(self.group_chat_id, "Usage: `/kb remove <source_id>`",
+                self.client.send_message(self.group_chat_id,
+                                         f"Usage: {mono('/kb remove <source_id>')}",
                                          thread=u.topic)
                 return None
             self.knowledge.remove_source(args[0])
-            self.client.send_message(self.group_chat_id, f"📚 Removed `{args[0]}`.",
+            self.client.send_message(self.group_chat_id, f"📚 Removed {mono(args[0])}.",
                                      thread=u.topic)
             return args[0]
 
         self.client.send_message(self.group_chat_id,
-                                 "Usage: `/kb add|list|sync|remove`", thread=u.topic)
+                                 f"Usage: {mono('/kb add|list|sync|remove')}", thread=u.topic)
         return None
 
     # -- /hyp — hypothesis registry (quant research) ----------------------- #
@@ -283,20 +312,24 @@ class Gateway:
             try:
                 h = self.hypotheses.get(args[0])
             except KeyError:
-                self.client.send_message(self.group_chat_id, f"Unknown hypothesis `{args[0]}`.",
+                self.client.send_message(self.group_chat_id,
+                                         f"Unknown hypothesis {mono(args[0])}.",
                                          thread=u.topic)
                 return None
-            lines = [h.short(), f"universe: {h.universe or '—'} · proposed by {h.agent or '—'}"]
+            lines = [esc(h.short()),
+                     f"universe: {esc(h.universe or '—')} · "
+                     f"proposed by {esc(h.agent or '—')}"]
             if h.invalidated_reason:
-                lines.append(f"invalidated: {h.invalidated_reason}")
+                lines.append(f"invalidated: {esc(h.invalidated_reason)}")
             for r in h.results:
                 lines.append(
-                    f"  · {r.get('spec','?')} [{r.get('start','')}→{r.get('end','')}] "
+                    f"  · {esc(r.get('spec','?'))} "
+                    f"[{esc(r.get('start',''))}→{esc(r.get('end',''))}] "
                     f"Sharpe {r.get('sharpe', 0):.2f}, maxDD {r.get('max_drawdown', 0):.1%}"
                 )
             lineage = self.hypotheses.lineage(h.id)
             if len(lineage) > 1:
-                lines.append("lineage: " + " → ".join(x.id for x in lineage))
+                lines.append("lineage: " + esc(" → ".join(x.id for x in lineage)))
             self.client.send_message(self.group_chat_id, "\n".join(lines), thread=u.topic)
             return h
 
@@ -305,9 +338,9 @@ class Gateway:
         if not rows:
             text = "🔬 No hypotheses recorded yet."
         else:
-            text = "\n".join(["🔬 *Hypothesis registry*"] + [
-                "  " + h.short() + (f"\n      ↳ {h.invalidated_reason}"
-                                    if h.invalidated_reason else "")
+            text = "\n".join([bold("🔬 Hypothesis registry")] + [
+                "  " + esc(h.short()) + (f"\n      ↳ {esc(h.invalidated_reason)}"
+                                         if h.invalidated_reason else "")
                 for h in rows
             ])
         self.client.send_message(self.group_chat_id, text, thread=u.topic)
@@ -343,7 +376,7 @@ class Gateway:
         # Human-only gate enforcement (DESIGN.md §11): only allow-listed humans decide.
         if cb.user_id not in self.human_ids:
             self.client.send_channel(
-                f"⛔ blocked non-human gate decision on {run_id} by {cb.user_id}"
+                f"⛔ blocked non-human gate decision on {esc(run_id)} by {esc(cb.user_id)}"
             )
             return None
         assert self.engine is not None, "engine not attached"
@@ -381,9 +414,9 @@ class Gateway:
         return f"#{task['id']} · {task['topic']}"
 
     def _notify_plan(self, task, plan, run_id, agent):
-        lines = [f"🧭 *Plan* by {agent} — acceptance criteria:"]
-        lines += [f"  {i+1}. {c}" for i, c in enumerate(plan.criteria)]
-        lines.append("Steps: " + "; ".join(plan.steps))
+        lines = [f"🧭 {bold('Plan')} by {esc(agent)} — acceptance criteria:"]
+        lines += [f"  {i+1}. {esc(c)}" for i, c in enumerate(plan.criteria)]
+        lines.append("Steps: " + esc("; ".join(plan.steps)))
         self.client.send_message(self.group_chat_id, "\n".join(lines), thread=self._thread(task))
 
     def _notify_gate_plan(self, task, plan, run_id, agent):
@@ -393,7 +426,8 @@ class Gateway:
         ]
         self.client.send_message(
             self.group_chat_id,
-            f"⏸️ Plan needs your sign-off (touches an escalation area). Agent: {agent}",
+            f"⏸️ Plan needs your sign-off (touches an escalation area). "
+            f"Agent: {esc(agent)}",
             buttons=buttons, thread=self._thread(task),
         )
 
@@ -401,21 +435,24 @@ class Gateway:
         cited = " · ".join(p.cite() for p in passages[:4])
         self.client.send_message(
             self.group_chat_id,
-            f"📚 {agent} retrieved {len(passages)} passage(s): {cited}",
+            f"📚 {esc(agent)} retrieved {len(passages)} passage(s): {esc(cited)}",
             thread=self._thread(task),
         )
 
     def _notify_progress(self, task, run_id, agent, text):
-        self.client.send_message(self.group_chat_id, f"🔧 {agent}: {text}", thread=self._thread(task))
+        self.client.send_message(self.group_chat_id, f"🔧 {esc(agent)}: {esc(text)}",
+                                 thread=self._thread(task))
 
     def _notify_verdict(self, task, run_id, verdict, tester):
         if verdict.passed:
-            self.client.send_message(self.group_chat_id, f"✅ {tester} passed step {verdict.step + 1}",
+            self.client.send_message(self.group_chat_id,
+                                     f"✅ {esc(tester)} passed step {verdict.step + 1}",
                                      thread=self._thread(task))
         else:
             reasons = "; ".join(verdict.reasons)
             self.client.send_message(self.group_chat_id,
-                                     f"❌ {tester} rejected step {verdict.step + 1}: {reasons}",
+                                     f"❌ {esc(tester)} rejected step "
+                                     f"{verdict.step + 1}: {esc(reasons)}",
                                      thread=self._thread(task))
 
     def _notify_gate_review(self, task, run_id, artifact, agent, tester):
@@ -427,47 +464,51 @@ class Gateway:
             Button("❌ Reject", f"reject|{run_id}|review"),
         ]
         text = (
-            f"🟣 *In Review* — owner: {agent} 🤖 · tested by: {tester} 🤖 ✅\n"
-            f"Draft: {content}\nFiles: {files}"
+            f"🟣 {bold('In Review')} — owner: {esc(agent)} 🤖 · "
+            f"tested by: {esc(tester)} 🤖 ✅\n"
+            f"Draft: {esc(content)}\nFiles: {esc(files)}"
         )
         if artifact and artifact.citations:
-            text += "\n📚 Sources: " + " · ".join(c.render() for c in artifact.citations)
+            text += "\n📚 Sources: " + esc(" · ".join(c.render()
+                                                     for c in artifact.citations))
         self.client.send_message(self.group_chat_id, text, buttons=buttons, thread=self._thread(task))
-        self.client.send_channel(f"👀 Review needed: #{task['id']} {task['title']}")
+        self.client.send_channel(f"👀 Review needed: #{esc(task['id'])} {esc(task['title'])}")
 
     def _notify_failed(self, run_id, task_id, node, agent, error):
         """A run crashed. Say so in the thread — silence looks like a hung task."""
         task = self.storage.get_task(task_id)
         first_line = str(error).splitlines()[0] if error else "unknown error"
         detail = "\n".join(str(error).splitlines()[1:6])
-        text = (f"❌ *Run failed* at the `{node}` step ({agent}).\n"
-                f"{first_line}")
+        text = (f"❌ {bold('Run failed')} at the {mono(node)} step ({esc(agent)}).\n"
+                f"{esc(first_line)}")
         if detail:
-            text += f"\n```\n{detail}\n```"
-        text += "\nThe task is back to *Todo* — fix the cause and re-run it."
+            text += f"\n<pre>{esc(detail)}</pre>"
+        text += f"\nThe task is back to {bold('Todo')} — fix the cause and re-run it."
         self.client.send_message(self.group_chat_id, text, thread=self._thread(task))
-        self.client.send_channel(f"❌ Run failed on #{task_id} at {node}: {first_line}")
+        self.client.send_channel(
+            f"❌ Run failed on #{esc(task_id)} at {esc(node)}: {esc(first_line)}")
         self._refresh_task_card(task_id)
 
     def _notify_escalate(self, run_id, task_id, reason):
         task = self.storage.get_task(task_id)
-        self.client.send_message(self.group_chat_id, f"🚨 Escalation: {reason}",
+        self.client.send_message(self.group_chat_id, f"🚨 Escalation: {esc(reason)}",
                                  thread=self._thread(task))
-        self.client.send_channel(f"🚨 Escalation on #{task_id}: {reason}")
+        self.client.send_channel(f"🚨 Escalation on #{esc(task_id)}: {esc(reason)}")
 
     def _notify_done(self, task, run_id, agent, lessons):
         self._refresh_task_card(task["id"])
         if lessons:
             self.client.send_message(
                 self.group_chat_id,
-                "🧠 Learned: " + " | ".join(lessons),
+                "🧠 Learned: " + esc(" | ".join(lessons)),
                 thread=self._thread(task),
             )
-        self.client.send_channel(f"🟢 Done: #{task['id']} {task['title']} (by {agent})")
+        self.client.send_channel(
+            f"🟢 Done: #{esc(task['id'])} {esc(task['title'])} (by {esc(agent)})")
 
     def _notify_soul_amendment_proposed(self, agent, lesson, task_id):
         self.client.send_channel(
-            f"📜 Soul amendment for {agent} (recurring lesson): {lesson}"
+            f"📜 Soul amendment for {esc(agent)} (recurring lesson): {esc(lesson)}"
         )
 
     # ================================================================== #
@@ -500,9 +541,9 @@ class Gateway:
         emoji = _STATUS_EMOJI.get(task["status"], "•")
         owner = task["owner"] or "unclaimed"
         status_label = task["status"].replace("_", " ").title()
-        return (f"{emoji} #{task['id']} · {status_label} · {task['topic']}\n"
-                f"{task['title']}\n"
-                f"owner: {owner}")
+        return (f"{emoji} #{esc(task['id'])} · {esc(status_label)} · {esc(task['topic'])}\n"
+                f"{esc(task['title'])}\n"
+                f"owner: {esc(owner)}")
 
 
 def _source_type(uri: str) -> str:
