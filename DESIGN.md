@@ -731,13 +731,18 @@ Learn node. The broadcast **Telegram Channel** receives review-needed pings and 
 daily digest (tasks done, awaiting review, agent activity), so humans "catch up in
 one place" without scrolling every topic.
 
-**Board** — the Mini App renders the kanban (columns = statuses, filters by topic/
+**Board (today)** — `/board`, and the **Open board** button on every task card, post the
+kanban as text: tasks grouped by status, scoped to the current topic, with `/board all`
+for the whole workspace. Finished columns are capped so live work stays visible. This
+ships ahead of the Mini App because a card button that promises a view must deliver one.
+
+**Board (Mini App)** — the Mini App renders the kanban (columns = statuses, filters by topic/
 agent), plus the agent console (souls, memories, heartbeats, run traces) and the
 **knowledge browser** (sources, sync health, retrieval preview — §4.1.4). Auth via
 Telegram's `initData` signature — no separate login.
 
-**Commands** — `/task`, `/status`, `/agents`, and the knowledge set `/kb add|list|sync|
-remove` (or upload a `.md`/`.pdf`/`.txt`/`.csv` document with `/kb add` to index it into
+**Commands** — `/task`, `/board`, `/status`, `/agents`, and the knowledge set
+`/kb add|list|sync|remove` (or upload a `.md`/`.pdf`/`.txt`/`.csv` document with `/kb add` to index it into
 the topic-owning agent's corpus). `/start` in a DM with `@TeleRaftBot` re-enters the
 onboarding agent, which can add a pillar or a source to an existing workspace (§3.3.4).
 

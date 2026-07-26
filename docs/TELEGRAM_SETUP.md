@@ -687,6 +687,7 @@ is tombstoned.
 
 | Command | Effect |
 |---|---|
+| `/board` · `/board all` | The kanban as text: tasks grouped by status for this topic, or the whole workspace. Same as the **Open board** button on a task card. |
 | `/agents` (or `/help`) | Who is on the team, what each owns, and what escalates — **check this first if an @mention seems to do nothing** |
 | `/kb add <uri> [--team]` | Register + ingest. Scoped to the agent owning the current topic. |
 | `/kb list` | Every source with status, doc and chunk counts, and any error |

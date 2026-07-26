@@ -121,6 +121,9 @@ class Gateway:
         if u.text.strip().startswith("/hyp"):
             return self.handle_hyp_command(u)
 
+        if u.text.strip().startswith("/board"):
+            return self.handle_board_command(u)
+
         if u.text.strip().startswith(("/agents", "/help")):
             return self.handle_help_command(u)
 
@@ -184,6 +187,59 @@ class Gateway:
                      f"teleraft.toml (a quant desk needs {mono('agents/quant')}).")
         self.client.send_message(self.group_chat_id, text, thread=u.topic)
 
+    # -- the task board ---------------------------------------------------- #
+    def _on_open_board(self, rest: str, cb: Callback):
+        """The 'Open board' button on a task card.
+
+        DESIGN.md §6 renders the kanban in a Mini App, which is a later phase. Until
+        then this replies with the same board as text — a button that promises a view
+        and delivers nothing is worse than no button.
+        """
+        task = self.storage.get_task(rest) if rest and rest != "open" else None
+        topic = task["topic"] if task else ""
+        return self.render_board(topic=topic, thread=topic)
+
+    def handle_board_command(self, u: Update):
+        """`/board` — every task in this topic, or `/board all` for the workspace."""
+        scope_all = u.text.strip().split()[1:2] == ["all"]
+        return self.render_board(topic="" if scope_all else u.topic, thread=u.topic)
+
+    def render_board(self, topic: str = "", thread: str = ""):
+        """Post the kanban as text, grouped by status."""
+        columns = self.tasks.board(topic=topic or None)
+        title = f"📋 {'Board' if not topic else 'Board · ' + topic}"
+        lines = [bold(title)]
+
+        order = [("todo", "🟡 Todo"), ("in_progress", "🔵 In Progress"),
+                 ("in_review", "🟣 In Review"), ("done", "🟢 Done"),
+                 ("closed", "⚪️ Closed")]
+        total = 0
+        for key, label in order:
+            rows = columns.get(key, [])
+            if not rows:
+                continue
+            total += len(rows)
+            lines.append(f"\n{label} ({len(rows)})")
+            # Newest last is how a chat reads; cap the finished columns so a long
+            # history cannot push the live work off the screen.
+            shown = rows[-5:] if key in ("done", "closed") else rows
+            for row in shown:
+                owner = row["owner"] or "unclaimed"
+                suffix = "" if topic else f" · {esc(row['topic'])}"
+                lines.append(f"  #{esc(row['id'])} {esc(row['title'])} "
+                             f"— {esc(owner)}{suffix}")
+            if len(rows) > len(shown):
+                lines.append(f"  … and {len(rows) - len(shown)} older")
+
+        if not total:
+            lines.append("\nNothing here yet. Open work with "
+                         f"{mono('/task <what to do>')} or {mono('@Agent <what to do>')}.")
+        elif topic:
+            lines.append(f"\n{mono('/board all')} for the whole workspace.")
+
+        self.client.send_message(self.group_chat_id, "\n".join(lines), thread=thread)
+        return columns
+
     # -- /agents · /help --------------------------------------------------- #
     def handle_help_command(self, u: Update):
         """Show who is on the team and what they own — the first thing to check when
@@ -209,8 +265,8 @@ class Gateway:
                 lines.append(f"      escalates on: {esc(', '.join(escalate))}")
         lines += [
             "",
-            bold("Commands") + f": {mono('/task <what to do>')} · {mono('/agents')} "
-            f"· {mono('/kb list')} · {mono('/hyp list')}",
+            bold("Commands") + f": {mono('/task <what to do>')} · {mono('/board')} "
+            f"· {mono('/agents')} · {mono('/kb list')} · {mono('/hyp list')}",
             f"Address an agent directly: {mono('@Name <what to do>')}",
         ]
         self.client.send_message(self.group_chat_id, "\n".join(lines), thread=u.topic)
@@ -363,7 +419,16 @@ class Gateway:
             return self._on_claim(rest, cb)
         if action in ("approve", "reject", "adjust"):
             return self._on_gate_decision(action, rest, cb)
-        raise ValueError(f"unknown callback action {action!r}")
+        if action == "board":
+            return self._on_open_board(rest, cb)
+        # An unrecognised action is almost always a button from an older deploy. It is
+        # the user's tap either way, so answer it rather than raising into the runner.
+        self.client.send_message(
+            self.group_chat_id,
+            f"🤷 That button ({mono(action or cb.data)}) is from an older version — "
+            f"try {mono('/board')} or {mono('/agents')}.",
+        )
+        return None
 
     def _on_claim(self, task_id: str, cb: Callback):
         try:
@@ -547,7 +612,7 @@ class Gateway:
     # ================================================================== #
     def _post_task_card(self, task_id: str, claimable: bool):
         task = self.storage.get_task(task_id)
-        buttons = [Button("Open board", "board|open")]
+        buttons = [Button("Open board", f"board|{task_id}")]
         if claimable:
             buttons.insert(0, Button("Claim", f"claim|{task_id}"))
         mid = self.client.send_message(self.group_chat_id, self._card_text(task),
@@ -561,7 +626,7 @@ class Gateway:
         if not task or not task["tg_card_message_id"]:
             return
         claimable = task["status"] == TaskStatus.TODO.value and not task["owner"]
-        buttons = [Button("Open board", "board|open")]
+        buttons = [Button("Open board", f"board|{task_id}")]
         if claimable:
             buttons.insert(0, Button("Claim", f"claim|{task_id}"))
         self.client.edit_message_text(self.group_chat_id, task["tg_card_message_id"],
