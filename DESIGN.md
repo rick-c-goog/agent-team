@@ -1,6 +1,6 @@
 # TeleRaft — Multi-Agent Team Workspace on Telegram
 
-**Design Document · v0.2 · 2026-07-25**
+**Design Document · v0.3 · 2026-07-26**
 
 > A workspace where humans and AI agents work together as real teammates — persistent
 > identities, shared channels, claimable tasks, and self-improving feedback loops —
@@ -16,6 +16,9 @@
 
 **Changelog**
 
+- **v0.3** — added §5.4 (staged pipelines: chaining POBT loops into a multi-stage
+  research pipeline with statistical gates), §11.1 (research-integrity limits), and the
+  pipeline data model in §7.
 - **v0.2** — added §3.3 (Hermes/OpenClaw as entry point and onboarding agent) and §4.1
   (per-agent knowledge base with RAG over web, Google Drive, and local files).
 - **v0.1** — initial design.
@@ -79,6 +82,12 @@ therefore owns a **knowledge base** — curated sources (web URLs, Google Drive 
 local `.md`/`.pdf`/`.txt`/`.csv` files) that are ingested, chunked, embedded, and
 retrieved during the Plan and Build nodes, with citations the Tester can check (§4.1).
 
+The fifth is **staging**. A single Plan → Build → Test loop is the right unit for one
+piece of work, but serious research is a *sequence* of independent gates, each capable of
+killing the idea. TeleRaft therefore chains loops into **pipelines**: an item enters,
+passes or dies at each stage, and every stage is a full POBT run with its own acceptance
+criteria and its own checker (§5.4).
+
 ### 1.4 Goals
 
 1. Humans and agents collaborate in one Telegram workspace with zero custom client software.
@@ -90,6 +99,9 @@ retrieved during the Plan and Build nodes, with citations the Tester can check (
    onboarding agent — no YAML authored by hand, no console, no docs required.
 7. **Every agent answers from its own curated knowledge**, not just model priors: RAG over
    web, Google Drive, and local documents, with sources cited in the deliverable.
+8. **Multi-stage work is expressible as a pipeline of gated loops**, where each stage is
+   independently checkpointed, independently reviewable, and able to terminate the item —
+   so that "it survived" means it survived every gate, not that nobody stopped it.
 
 ### 1.5 Non-goals (v1)
 
@@ -102,6 +114,10 @@ retrieved during the Plan and Build nodes, with citations the Tester can check (
   store (SQLite/pgvector to start) and read from systems of record we don't own.
 - Write access to knowledge sources: Google Drive and local files are **read-only** to
   agents; TeleRaft never edits your documents (§11).
+- Becoming a statistics or econometrics library. The pipeline in §5.4 defines the *gates*
+  and where they sit; the estimators behind them are ordinary reviewed code, and anything
+  needing licensed or curated data (factor returns, point-in-time fundamentals) is an
+  external source the operator supplies — never synthesized to make a gate pass.
 
 ---
 
@@ -689,6 +705,170 @@ other agent, run through its own loop — and the parent run's Orchestrator susp
 on it like a human gate. Agents also converse directly in task threads (their bots
 post as themselves), so humans see the collaboration happen in Telegram.
 
+### 5.4 Staged pipelines: chaining loops
+
+#### 5.4.1 Why one loop is not enough
+
+The POBT loop is the right unit for *one* deliverable. But the work that actually
+justifies an agent team is rarely one deliverable — it is a **funnel**, where an idea
+must survive several independent challenges, each capable of killing it, and where the
+value comes from how many ideas die.
+
+Prior art we are following here: Roan's six-stage quant research swarm built on
+**Slate**, an AI coding harness whose **Programs** are loops that "run continuously and
+hold state between runs". That description is the important part, and it maps onto
+machinery TeleRaft already has:
+
+| Slate concept | TeleRaft equivalent | Where |
+|---|---|---|
+| A *Program* — a loop that runs continuously | A **heartbeat** firing a graph run on the host scheduler | §3.3.1, §4 |
+| "holds state between runs" | **Checkpointed `RunState`** plus the durable registries in §7 | §5.2 |
+| Swarm of subagents fanned out over work | The **agent team**: claimable tasks, one owner each | §6 |
+| Maker–checker across different models | **"No agent grades its own work"**, enforced by the graph | §5.1 |
+| Slack notifications | Telegram is the workspace itself | §2 |
+
+So "replace Slate with TeleRaft" is mostly a matter of naming: what Slate calls a
+Program, TeleRaft calls a heartbeat-triggered run over a checkpointed graph. What is
+genuinely missing is the **chaining** — a way to say that an item must pass stage 1
+before stage 2 sees it, with each stage a full loop in its own right.
+
+#### 5.4.2 The Pipeline abstraction
+
+```
+Pipeline := ordered list of Stages
+Stage    := { name, owner_agent, checker_agent, criteria, on_pass, on_fail }
+```
+
+Three rules give the abstraction its value:
+
+1. **A stage is a POBT run.** Not a function call — a full Planner/Orchestrator/Builder/
+   Tester loop, with its own acceptance criteria, its own adversarial checker, its own
+   checkpoint, and its own audit trail. A stage can therefore be re-run, resumed, or
+   escalated to a human exactly like any other unit of work.
+2. **Any stage can terminate the item.** A failing gate does not retry forever; it
+   records *why* and kills the item, which is what makes the funnel a filter rather than
+   a queue. This is the `terminal` verdict from §5.2, used deliberately.
+3. **The handoff is typed and recorded.** Stage *n*'s artifact is stage *n+1*'s input,
+   and both are persisted, so any conclusion can be traced back through every gate it
+   passed.
+
+```mermaid
+flowchart LR
+    I[Item enters] --> S1
+    subgraph S1["Stage 1 · POBT run"]
+        P1[Plan] --> B1[Build] --> T1[Test]
+    end
+    S1 -->|pass| S2
+    S1 -->|fail| K1[(killed · reason recorded)]
+    subgraph S2["Stage 2 · POBT run"]
+        P2[Plan] --> B2[Build] --> T2[Test]
+    end
+    S2 -->|pass| S3[…further stages…]
+    S2 -->|fail| K2[(killed · reason recorded)]
+    S3 -->|survives every gate| H[Human review]
+```
+
+Nothing here is quant-specific: the same shape fits a hiring funnel, a compliance review,
+or a content pipeline. §5.4.3 is the worked example that motivated it.
+
+#### 5.4.3 Worked example: the six-stage alpha pipeline
+
+Each stage has a **maker** and a **checker**, and they are different agents (§5.1). A
+stage that passes hands its artifact forward; a stage that fails invalidates the
+hypothesis in the registry with its reason (§4.1-equivalent for research: the hypothesis
+registry), which is what stops the desk re-testing it tomorrow.
+
+| # | Stage | Maker produces | Gate the checker applies |
+|---|---|---|---|
+| 1 | **Idea** | A falsifiable hypothesis with a named universe, direction, and the source it came from | Is it falsifiable, in scope, and not already invalidated? |
+| 2 | **Features** | The feature vector: cross-sectionally standardized, outliers handled, point-in-time correct | Any lookahead? Any survivorship? Are missing values handled, not dropped silently? |
+| 3 | **Backtest** | Portfolio-level result with realistic costs, turnover, capacity | Do the mechanics hold — lag applied, costs charged, enough bars to conclude? |
+| 4 | **Validation** | Significance statistics on the return series | Newey–West t-stat, bootstrap distribution, and **in-sample vs out-of-sample degradation** within tolerance |
+| 5 | **Regime** | Per-regime performance across a volatility/return segmentation | Does it work in more than one regime, or is it regime timing wearing a costume? |
+| 6 | **Attribution** | Regression of the signal against known factors | Is there residual alpha after the factors are removed, or is this a repackaged factor? |
+
+The ordering is deliberate and cheap-first: stage 3 is expensive, so stages 1–2 kill the
+obviously-doomed before it runs; stages 4–6 are the ones that kill the *plausible* ones,
+which is where most of the value is.
+
+#### 5.4.4 The statistical gates, and the one the source material misses
+
+Stages 4–6 are the substance. Without them, an agent swarm is not a research desk — it
+is a much faster way to overfit.
+
+- **Autocorrelation.** Daily strategy returns are not independent; a naive t-statistic
+  overstates significance. Newey–West standard errors correct for it.
+- **Distributional assumptions.** A bootstrap over resampled returns gives a
+  significance estimate that does not assume normality — which strategy returns
+  emphatically are not.
+- **In-sample vs out-of-sample degradation.** The comparison, not either number alone,
+  is the tell. A large drop is the signature of a fitted parameter.
+- **Regime dependence.** A signal that only worked in one volatility regime is a bet on
+  that regime recurring, and should be labelled as such rather than sold as alpha.
+- **Factor attribution.** Regressing against known factors answers "is this new?" A
+  strategy whose returns are explained by momentum *is* momentum, however it was derived.
+
+> **The gate that is missing from the source architecture: multiple testing.**
+> A pipeline that runs continuously will test thousands of hypotheses. At a 5%
+> significance threshold, **1 in 20 pure-noise hypotheses passes by construction** — so a
+> swarm testing 10,000 ideas manufactures roughly 500 "significant" discoveries from
+> nothing at all. Newey–West and bootstrap do not help here; they correct the statistics
+> of a *single* test.
+>
+> This is where persistent state stops being a convenience and becomes a correctness
+> requirement. Because the hypothesis registry already records **every test ever run**,
+> TeleRaft can apply a trials-aware correction — a deflated Sharpe ratio using the number
+> of trials, or a false-discovery-rate procedure across the batch — which a stateless
+> swarm structurally cannot. The registry's count of dead hypotheses is not just an audit
+> trail; it is an *input to the significance calculation*.
+>
+> Design rule: **the trial count is part of the evidence.** A result reported without the
+> number of hypotheses that preceded it is incomplete.
+
+#### 5.4.5 Concurrency: pipeline, not barrier
+
+Stages are ordered *per item*, not globally. Hypothesis A can be at stage 5 while
+hypothesis B is still at stage 2. Requiring every item to clear stage *n* before any
+item starts stage *n+1* would idle the desk behind its slowest idea, for no benefit —
+the stages share no cross-item state except the registry, and the registry is designed
+for concurrent appends.
+
+The exception is the multiple-testing correction (§5.4.4), which is *inherently*
+cross-item: it must see the batch. It therefore runs as a **synthesis step over a
+completed round**, not as a per-item stage — the one place a barrier is correct.
+
+#### 5.4.6 State: the registry is the Program's memory
+
+Slate's Programs "hold state between runs"; here that state is explicit and queryable
+rather than in-process:
+
+- **Hypothesis registry** — every idea, its status, its lineage, and *why* it died, so a
+  later run cannot re-propose it (§ self-improvement).
+- **Run checkpoints** — each stage resumable at its last node, so a restart mid-pipeline
+  continues rather than restarts.
+- **Trial ledger** — the count and identity of every test, feeding §5.4.4.
+
+Because this state is durable, a pipeline can be stopped, redeployed, and resumed, and
+its conclusions remain auditable after the process that produced them is long gone.
+
+#### 5.4.7 What is honest to claim
+
+The source architecture cites thresholds — out-of-sample Sharpe above 1.5, drawdown of
+5–8%, t-statistic above 2.5. These are configurable in our design and **deliberately not
+presented as attainable defaults**: a sustained out-of-sample Sharpe of 1.5 at single-digit
+drawdown is exceptional even at well-resourced funds, and a pipeline tuned until it emits
+such numbers is far more likely to have found a bug or a leak than an edge.
+
+Three honesty rules the design enforces rather than recommends:
+
+1. **Provenance travels with every number** — which data, which period, which conventions
+   (already implemented for backtests).
+2. **Negative results are first-class output.** A stage that kills an idea has produced a
+   finding, and the pipeline reports it as such rather than as a failure.
+3. **Gates that cannot be evaluated must block, not pass.** If factor returns are
+   unavailable, stage 6 reports "cannot evaluate" and the item does not graduate.
+   Synthesizing the inputs to a gate defeats the gate.
+
 ---
 
 ## 6. Task Lifecycle in Telegram
@@ -778,6 +958,19 @@ knowledge_doc(id, source_id, external_id /*url, drive fileId, path*/, title,
 knowledge_chunk(id, doc_id, seq, text, locator /*"p.12", "# Brand > ## Tone", "row 4"*/,
                 token_count, embedding /*vector*/, created_at)
 citation(id, run_id, step, chunk_id, quote, created_at)   -- what the Builder actually cited
+
+-- §5.4 Staged pipelines ------------------------------------------------------
+pipeline(id, workspace_id, name, stages_json /*ordered stage specs*/, enabled,
+         created_at)
+pipeline_item(id, pipeline_id, subject_ref /*e.g. hypothesis id*/, stage_index,
+              status /*running|passed|killed|blocked|graduated*/, killed_at_stage?,
+              kill_reason?, created_at, updated_at)
+stage_run(id, item_id, stage_index, stage_name, run_id /*the POBT run*/,
+          verdict /*pass|fail|cannot_evaluate*/, reasons_json, artifact_ref,
+          started_at, finished_at)
+-- Every test ever run, so significance can be corrected for trial count (§5.4.4).
+trial(id, pipeline_id, subject_ref, stage_name, statistic REAL, p_value REAL,
+      created_at)
 
 -- §3.3 Onboarding ----------------------------------------------------------
 onboarding_session(id, workspace_id, host /*hermes|openclaw*/, tg_user_id,
@@ -879,6 +1072,15 @@ for Hermes Agent and OpenClaw; heartbeats registered via `schedule()`; the inter
 `workspace.plan.yaml` → approve → idempotent apply flow, run as a real POBT graph run
 with the Tester verifying the provisioned workspace.
 
+**Phase 5b — Staged pipelines (wk 12–13).** The `Pipeline`/`Stage` abstraction over
+existing runs (§5.4.2): typed handoff, per-stage criteria and checker, terminal kill with
+recorded reason, resumable mid-pipeline. Then the statistical gates as ordinary reviewed
+code — Newey–West standard errors, bootstrap resampling, IS/OOS degradation, a regime
+segmentation, factor attribution — each of which **blocks rather than passes** when its
+inputs are unavailable. The trial ledger and the trials-aware correction (§5.4.4) land
+with this phase, not after it: a pipeline that reports significance without a trial count
+is worse than no pipeline, because it is confidently wrong.
+
 **Phase 6 — Mini App & polish (wk 13–14).** Kanban board, agent console, knowledge
 browser + retrieval preview, run-trace viewer; daily digest; rate-limit hardening.
 
@@ -922,6 +1124,20 @@ The Tester *role* checks agent output; this section is about testing the *system
   is **idempotent** (running twice creates nothing the second time); a plan that would
   yield a single agent fails its own Tester check ("nobody could review"); partial apply
   interrupted mid-way resumes from checkpoint without duplicating topics or bots.
+- **Pipelines** (§5.4): an item killed at stage *n* never reaches stage *n+1*; a
+  pipeline resumes mid-stage after a restart; a stage whose inputs are missing returns
+  `cannot_evaluate` and **blocks** rather than passing; and stage ordering is per-item,
+  so one slow item cannot stall the others.
+- **Statistical gates against known answers.** These are the tests that matter most,
+  because a subtly wrong estimator produces confident nonsense: feed pure white noise
+  and assert the pipeline kills it; feed a series with a known injected edge and assert
+  it survives; feed an autocorrelated series and assert the Newey–West t-statistic is
+  materially below the naive one; feed a signal that is a known factor in disguise and
+  assert stage 6 finds no residual alpha.
+- **Multiple testing**: running N noise hypotheses must yield roughly N×α naive
+  "discoveries" and approximately zero after the trials-aware correction — the property
+  that distinguishes a research pipeline from a random number generator with good
+  manners.
 - **Chaos**: kill the daemon mid-Build, drop webhooks, expire a runtime session —
   every run must resume or escalate, never silently die.
 
@@ -966,6 +1182,27 @@ The Tester *role* checks agent output; this section is about testing the *system
 - **Audit.** Every approval, soul change, knowledge sync, citation, and run trace is
   immutable and attributable.
 
+### 11.1 Research integrity
+
+A pipeline that emits confident, quantitative, wrong conclusions is more dangerous than
+one that emits nothing, because the numbers carry authority the process has not earned.
+These limits are part of the design, not advice layered on top:
+
+- **No execution path.** The system produces research for a human to read. There are no
+  broker connectors and no order placement anywhere in it, and adding them is out of
+  scope for this design rather than merely unimplemented.
+- **Nothing graduates without a human.** Surviving all six gates makes an item eligible
+  for human review; it does not make it a recommendation.
+- **Gates fail closed.** Missing factor returns, too short a sample, an unavailable data
+  source — each yields `cannot_evaluate`, which blocks. The tempting alternative
+  (synthesize the input, pass the gate) destroys the only thing the pipeline is for.
+- **Trial count is reported with every result** (§5.4.4). A Sharpe ratio without the
+  number of hypotheses tested to find it is not a finding.
+- **Synthetic data is labelled as such everywhere it appears**, because plausible numbers
+  from pseudo-prices are exactly the kind of output that gets quoted out of context.
+- **The system is not a licensed adviser** and its output is not investment advice; that
+  statement belongs on the artifacts themselves, not only in the documentation.
+
 ---
 
 ## 12. Open Questions
@@ -993,6 +1230,22 @@ The Tester *role* checks agent output; this section is about testing the *system
    grounding rejection?
 10. **Stale-source policy** — if a source hasn't synced successfully in N days, should
     affected tasks be blocked, or proceed with a loud warning on the review card?
+11. **Which trials-aware correction** (§5.4.4) — deflated Sharpe using the trial count is
+    the most direct, false-discovery-rate control the most standard. They answer slightly
+    different questions; do we report both, and what do we do about trials from an earlier
+    epoch when the universe or cost model has since changed?
+12. **Does the trial ledger ever reset?** Counting every hypothesis since inception makes
+    the correction increasingly punishing, which is arguably correct and arguably makes
+    the desk useless after a year. Roll the window, or segment by universe?
+13. **Regime segmentation method** — a hidden Markov model is the literature's answer and
+    is expensive and fiddly; volatility terciles are transparent and crude. Start crude
+    and state the crudeness, or start with the HMM?
+14. **Stage granularity** — six stages is the source's decomposition, not a law. Would
+    features-and-backtest as one stage lose anything, given a stage's real cost is a full
+    POBT run?
+15. **Pipelines beyond research** — the abstraction is domain-neutral (§5.4.2). Is a
+    second worked example (a content or compliance funnel) worth carrying in the design,
+    or does that dilute it?
 
 ---
 
@@ -1005,3 +1258,6 @@ The Tester *role* checks agent output; this section is about testing the *system
 - Hermes Agent (Nous Research) — [Scheduled tasks / cron](https://hermes-agent.nousresearch.com/docs/user-guide/features/cron) · [scheduling guide](https://hermes-agent.ai/how-to/how-to-schedule-tasks-with-hermes)
 - OpenClaw (formerly Clawdbot / Moltbot) — [Docs](https://docs.openclaw.ai/) · [Project site](https://openclaw.ai/) · [Overview](https://www.digitalocean.com/resources/articles/what-is-openclaw)
 - Google Drive API — read-only scope `drive.readonly`, files export for Docs/Sheets/Slides
+- Roan (@RohOnChain) — six-stage quant research swarm built on **Slate** ([post](https://x.com/rohonchain/status/2080296261576687751), [summary mirror](https://youmind.com/landing/x-viral-articles/build-ai-agent-swarm-quant-alpha)); Slate is an AI coding harness by Random Labs whose *Programs* are continuously running, state-holding loops. §5.4 adapts the staged funnel and adds the multiple-testing gate.
+- HKUDS/Vibe-Trading — [repo](https://github.com/HKUDS/Vibe-Trading); source of the self-improving loop, multi-agent teams, and cross-market backtesting features (docs/QUANT_TEAM_TUTORIAL.md)
+- Statistical background for §5.4.4: Newey–West HAC standard errors; bootstrap resampling for non-normal return distributions; Bailey & López de Prado on the deflated Sharpe ratio and backtest overfitting; Benjamini–Hochberg false-discovery-rate control
