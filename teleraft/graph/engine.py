@@ -249,7 +249,10 @@ class GraphEngine:
         if artifact.citations:
             self.storage.add_citations(run_id, state.current_step, artifact.citations)
         self.notify("progress", task=task, run_id=run_id, agent=state.agent,
-                    text=f"built step {state.current_step + 1}: {artifact.content[:80]}")
+                    # First line only: a hard character cut lands mid-word ("In-sample: po")
+                    # and reads like the message itself is broken.
+                    text=f"built step {state.current_step + 1}: "
+                         f"{artifact.content.splitlines()[0] if artifact.content else '(empty)'}")
         return "test"
 
     def _node_test(self, run_id: str, state: RunState) -> str:

@@ -64,6 +64,18 @@ trade"**, and every research note lands in **In Review** where a human must tap 
 > point for your own analysis, and decisions about real money are yours alone. If you
 > want advice, talk to a licensed adviser.
 
+Every research note carries its own provenance line, so a number never travels without
+the data behind it:
+
+```
+Data: synthetic (deterministic pseudo-prices — NOT real market data;
+      results prove the machinery works, nothing about markets)
+```
+
+A desk on a real loader shows that loader's name instead (`Data: yfinance`). If you see
+a Sharpe of 3.87 on a card, check that line first — on synthetic prices it means the
+arithmetic is right, not that the strategy is.
+
 ---
 
 ## 2. How Vibe-Trading's features map onto TeleRaft

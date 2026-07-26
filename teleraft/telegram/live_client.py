@@ -146,6 +146,8 @@ class LiveTelegramClient:
         self.topic_threads = topic_threads or {}
         # Injectable client makes this unit-testable with httpx.MockTransport.
         self._http = http or httpx.Client(timeout=60)
+        # message_id → last (text, keyboard) sent, so no-op edits are skipped.
+        self._last_edit: dict[str, tuple[str, str]] = {}
 
     # -- low-level --------------------------------------------------------- #
     def _call(self, method: str, _hint_key: str = "", **params) -> dict:
@@ -201,6 +203,13 @@ class LiveTelegramClient:
 
     def edit_message_text(self, chat_id: str, message_id: str, text: str,
                           buttons: Optional[list[Button]] = None) -> None:
+        # Skip edits that would change nothing. The task card is refreshed on every
+        # status transition, and Telegram answers an identical edit with 400
+        # "message is not modified" — harmless but it fills the log with red herrings.
+        keyboard = self._keyboard(buttons)
+        signature = (text, repr(keyboard))
+        if self._last_edit.get(str(message_id)) == signature:
+            return
         try:
             self._call(
                 "editMessageText",
@@ -208,12 +217,17 @@ class LiveTelegramClient:
                 message_id=int(message_id),
                 text=text,
                 parse_mode="HTML",
-                reply_markup=self._keyboard(buttons),
+                reply_markup=keyboard,
             )
+            self._last_edit[str(message_id)] = signature
         except RuntimeError as e:
-            # "message is not modified" is benign — ignore it.
-            if "not modified" not in str(e):
+            # Benign edit failures: the content is unchanged, or the message is gone
+            # (deleted, or too old to edit). Neither is worth failing a run over.
+            benign = ("not modified", "message to edit not found",
+                      "message can't be edited")
+            if not any(marker in str(e).lower() for marker in benign):
                 raise
+            log.debug("edit skipped: %s", str(e).splitlines()[0])
 
     def send_channel(self, text: str) -> str:
         # Empty when unconfigured *or* disabled by preflight — the activity feed is

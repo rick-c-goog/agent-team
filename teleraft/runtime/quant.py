@@ -127,6 +127,14 @@ class QuantRuntime:
     # ------------------------------------------------------------------ #
     # Data
     # ------------------------------------------------------------------ #
+    def data_provenance(self) -> str:
+        """One line naming the data behind every number this runtime produces."""
+        name = getattr(self.loader, "name", "unknown")
+        if name == "synthetic":
+            return ("synthetic (deterministic pseudo-prices — NOT real market data; "
+                    "results prove the machinery works, nothing about markets)")
+        return f"{name}"
+
     def _bars(self, symbol: str) -> Bars:
         return self.loader.load(symbol, "", "")
 
@@ -274,6 +282,10 @@ class QuantRuntime:
             ]
             if hasattr(result, "attribution_lines"):
                 lines.append("Attribution: " + " | ".join(result.attribution_lines()))
+            # Provenance travels with the numbers. A Sharpe of 3.87 means something
+            # very different on synthetic prices than on real ones, and a reviewer
+            # must not have to go looking for which they are reading.
+            lines.append(f"Data: {self.data_provenance()}")
             lines.append(f"Hypothesis: {ctx.get('hypothesis_id') or '(unregistered)'}")
             return Artifact(step=req.step, content="\n".join(lines),
                             files=[f"research/{_slug(universe)}-{family}-note.md"],

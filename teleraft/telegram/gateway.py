@@ -99,6 +99,8 @@ class Gateway:
         self.knowledge = None    # optional KnowledgeService for /kb commands
         self.hypotheses = None   # optional HypothesisRegistry for /hyp commands
         self.bot_username = ""   # set by the runner after getMe, to avoid self-replies
+        # run_id → (gate message id, text), so a decided gate can drop its buttons.
+        self._gate_cards: dict[str, tuple[str, str]] = {}
 
     def attach_engine(self, engine) -> None:
         self.engine = engine
@@ -380,8 +382,30 @@ class Gateway:
             )
             return None
         assert self.engine is not None, "engine not attached"
-        result = self.engine.resume(run_id, action, reason=cb.reason, user_id=cb.user_id)
+        # Take the tapped card *before* resuming: a rejection replans and can post a
+        # fresh gate card for the same run, which would otherwise be the one we settle.
+        tapped = self._gate_cards.pop(run_id, None)
+        try:
+            result = self.engine.resume(run_id, action, reason=cb.reason, user_id=cb.user_id)
+        except ValueError:
+            # Already decided — a duplicate tap on a card whose buttons were still
+            # showing. Retire them and say so, rather than raising.
+            self._settle_gate_card(tapped, "already decided", cb.user_id)
+            return None
+        self._settle_gate_card(tapped, action, cb.user_id)
         return self._present(result)
+
+    def _settle_gate_card(self, entry, decision: str, user_id: str) -> None:
+        """Drop the buttons from a decided gate card and record who decided."""
+        if not entry:
+            return
+        message_id, text = entry
+        mark = {"approve": "✅ Approved", "reject": "❌ Rejected",
+                "adjust": "✏️ Sent back"}.get(decision, f"— {decision}")
+        self.client.edit_message_text(
+            self.group_chat_id, message_id,
+            f"{text}\n\n{mark} by {esc(user_id)}", buttons=None,
+        )
 
     # ================================================================== #
     # Running a task through the graph
@@ -466,12 +490,19 @@ class Gateway:
         text = (
             f"🟣 {bold('In Review')} — owner: {esc(agent)} 🤖 · "
             f"tested by: {esc(tester)} 🤖 ✅\n"
-            f"Draft: {esc(content)}\nFiles: {esc(files)}"
+            f"Draft: {esc(content)}\n"
+            # <code> stops Telegram auto-linking paths: "…-note.md" otherwise looks
+            # like a Moldovan domain and renders as a dead hyperlink.
+            f"Files: {mono(files)}"
         )
         if artifact and artifact.citations:
-            text += "\n📚 Sources: " + esc(" · ".join(c.render()
-                                                     for c in artifact.citations))
-        self.client.send_message(self.group_chat_id, text, buttons=buttons, thread=self._thread(task))
+            text += "\n📚 Sources: " + mono(" · ".join(c.render()
+                                                      for c in artifact.citations))
+        mid = self.client.send_message(self.group_chat_id, text, buttons=buttons,
+                                       thread=self._thread(task))
+        # Remember the gate card so its buttons can be retired once a human decides —
+        # live buttons on a settled gate invite a second tap that can only error.
+        self._gate_cards[run_id] = (mid, text)
         self.client.send_channel(f"👀 Review needed: #{esc(task['id'])} {esc(task['title'])}")
 
     def _notify_failed(self, run_id, task_id, node, agent, error):
