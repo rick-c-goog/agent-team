@@ -239,7 +239,13 @@ class GraphEngine:
         # Step-scoped retrieval: the Builder gets passages for *this* step, not just the
         # task-level ones gathered at Intake (§4.1.3).
         step_query = self._step_query(state, task)
-        step_knowledge = self._retrieve(state.agent, step_query) or state.knowledge
+        # DESIGN.md §12 (decided): after a grounding rejection the Orchestrator may spend
+        # more of the budget on retrieval. The previous attempt failed for lack of
+        # evidence, so retrying with the same k retries the same failure.
+        k = self.knowledge_k
+        if self._last_rejection_was_grounding(state):
+            k = min(self.knowledge_k * 3, self.knowledge_k + 10)
+        step_knowledge = self._retrieve(state.agent, step_query, k) or state.knowledge
         req = self._req("builder", state.agent, state, task, step=state.current_step,
                         knowledge=step_knowledge)
         artifact, tokens = self.runtime_for(state.agent).build(req)
@@ -345,11 +351,25 @@ class GraphEngine:
         # Force the rejected step to be rebuilt.
         state.retries[step] = 0
 
-    def _retrieve(self, agent: str, query: str):
+    _GROUNDING_MARKERS = ("ungrounded", "no source", "cites no source", "unsourced",
+                          "citation", "not supported")
+
+    def _last_rejection_was_grounding(self, state: RunState) -> bool:
+        """Did the most recent verdict for this step fail for lack of evidence?"""
+        for verdict in reversed(state.verdicts):
+            if verdict.step != state.current_step:
+                continue
+            if verdict.passed:
+                return False
+            reasons = " ".join(verdict.reasons).lower()
+            return any(marker in reasons for marker in self._GROUNDING_MARKERS)
+        return False
+
+    def _retrieve(self, agent: str, query: str, k: Optional[int] = None):
         if self.knowledge is None:
             return []
         try:
-            return self.knowledge.retrieve(agent, query, self.knowledge_k)
+            return self.knowledge.retrieve(agent, query, k or self.knowledge_k)
         except Exception:
             # A broken index must never take down a run — it degrades to ungrounded
             # work, and source health surfaces the failure separately (§4.1.5).

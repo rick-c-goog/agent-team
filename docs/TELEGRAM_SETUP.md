@@ -98,7 +98,33 @@ agents), so disable privacy mode:
 > ⚠️ This is a deliberate trade-off (DESIGN.md §11): the workspace bot can read group
 > messages. Keep the workspace group private and invite-only.
 
-### 3.3 (Recommended) Create one bot per agent
+### 3.3 Puppet mode vs one bot per agent
+
+**Puppet mode is the default and the fast path.** The workspace bot speaks for every
+agent, attributing each message by name (`🔧 Quinn: …`), and `@Quinn` resolves by display
+name. One BotFather step and the team is live — set nothing else:
+
+```toml
+[telegram]
+bot_mode = "puppet"
+```
+
+Move to **per-agent bots** when you want each agent to have its own avatar, its own DMs,
+and native Telegram @mentions. It costs one BotFather bot per agent and a username map:
+
+```toml
+[telegram]
+bot_mode = "per_agent"
+
+[telegram.agent_usernames]
+Quinn  = "@Quinn_TR_Bot"
+Bailey = "@Bailey_TR_Bot"
+```
+
+Startup rejects `per_agent` without that map, rather than letting every @mention fail
+silently. The rest of this section covers creating those per-agent bots.
+
+### 3.3.1 Creating one bot per agent
 
 If you want real agent identities now, repeat `/newbot` for each pillar agent
 (`@Cole_TR_Bot`, `@Ray_TR_Bot`, `@Penn_TR_Bot`). For each, also set a profile that makes
@@ -446,6 +472,7 @@ and graph don't change. (Remember: you can't use `getUpdates` and a webhook at o
 | `group_chat_id` (`TELERAFT_GROUP_CHAT_ID`) | Supergroup id, e.g. `-1001234567890`. **Required.** |
 | `channel_id` (`TELERAFT_CHANNEL_ID`) | Broadcast channel `@handle` or `-100…` id. Optional. |
 | `human_ids` (`TELERAFT_HUMAN_IDS`) | List of numeric user ids allowed to approve/reject. **Required.** |
+| `bot_mode` (`TELERAFT_BOT_MODE`) | `puppet` (default) or `per_agent` — see §3.3. |
 | `topic_threads` | Table of `topic label → message_thread_id`. |
 | `agent_usernames` | Table of `agent name → @bot_username` for mention routing. |
 | `agent_bot_tokens` | Table of `agent name → token` (only for §17). |
@@ -465,6 +492,7 @@ and graph don't change. (Remember: you can't use `getUpdates` and a webhook at o
 | Key | Meaning |
 |---|---|
 | `root` (`TELERAFT_KNOWLEDGE_ROOT`) | Allow-listed root for `file` sources; agents cannot read outside it. |
+| per-source `sensitive: true` | Pins that source to **local** embedding — its text is never sent to a hosted provider (DESIGN.md §12 #7). |
 | `sync_on_start` | Ingest declared sources at startup (default `true`). |
 
 `[onboarding]` (§18):
@@ -688,6 +716,7 @@ is tombstoned.
 | Command | Effect |
 |---|---|
 | `/board` · `/board all` | The kanban as text: tasks grouped by status for this topic, or the whole workspace. Same as the **Open board** button on a task card. |
+| Weekly memory consolidation | Runs automatically Sunday 04:00, unattended: merges near-identical lessons and caps growth (DESIGN.md §12 #4). Reported to the activity feed. |
 | `/agents` (or `/help`) | Who is on the team, what each owns, and what escalates — **check this first if an @mention seems to do nothing** |
 | `/kb add <uri> [--team]` | Register + ingest. Scoped to the agent owning the current topic. |
 | `/kb list` | Every source with status, doc and chunk counts, and any error |

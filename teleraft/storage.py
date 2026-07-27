@@ -113,6 +113,7 @@ CREATE TABLE IF NOT EXISTS knowledge_source (
     uri TEXT NOT NULL,
     options_json TEXT,
     refresh_cron TEXT,
+    sensitive INTEGER NOT NULL DEFAULT 0,  -- 1 = never send text to a hosted provider
     status TEXT NOT NULL,          -- ok | error | syncing | pending
     last_error TEXT,
     last_synced_at REAL,
@@ -286,6 +287,10 @@ class Storage:
         )
         self.conn.commit()
 
+    def delete_memory(self, memory_id: int) -> None:
+        self.conn.execute("DELETE FROM memory_note WHERE id=?", (memory_id,))
+        self.conn.commit()
+
     def memories_for(self, agent_name: str) -> list[sqlite3.Row]:
         return self.conn.execute(
             "SELECT * FROM memory_note WHERE agent_name=? ORDER BY created_at", (agent_name,)
@@ -395,13 +400,14 @@ class Storage:
     # -- knowledge sources ------------------------------------------------- #
     def add_source(self, source_id: str, agent_name: Optional[str], scope: str, type_: str,
                    uri: str, options_json: str = "{}", refresh_cron: Optional[str] = None,
-                   created_by: str = "system") -> None:
+                   created_by: str = "system", sensitive: bool = False) -> None:
         self.conn.execute(
             "INSERT OR REPLACE INTO knowledge_source(id, agent_name, scope, type, uri,"
-            " options_json, refresh_cron, status, last_error, last_synced_at, created_by, created_at)"
-            " VALUES(?,?,?,?,?,?,?,'pending',NULL,NULL,?,?)",
+            " options_json, refresh_cron, sensitive, status, last_error, last_synced_at,"
+            " created_by, created_at)"
+            " VALUES(?,?,?,?,?,?,?,?,'pending',NULL,NULL,?,?)",
             (source_id, agent_name, scope, type_, uri, options_json, refresh_cron,
-             created_by, _now()),
+             1 if sensitive else 0, created_by, _now()),
         )
         self.conn.commit()
 

@@ -1,9 +1,10 @@
-# Backtester / validation — the adversarial reviewer of the quant desk.
+# Backtester / validation — the dedicated QA seat for the research pillar.
+# role: qa means pick_tester routes # research work here first (DESIGN.md §12).
 name: Bailey
-role: member
+role: qa
 soul: souls/bailey.md
 goals:
-  owns: ["backtesting", "validation", "# backtest"]
+  owns: ["backtesting", "validation", "factor research", "# research", "# backtest"]
   escalate_when:
     - "live trading"
     - "real money"

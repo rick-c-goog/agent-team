@@ -125,20 +125,39 @@ class Registry:
     def pick_tester(self, exclude: str) -> str:
         """Choose a reviewer that is NOT the builder (no self-grading).
 
-        Policy v1 (DESIGN.md §12 open question): any other active agent, preferring one
-        whose goals overlap the excluded agent's ownership; deterministic tie-break by
-        name so runs are reproducible.
+        Policy (DESIGN.md §12, decided): **a dedicated QA agent per pillar.** Review is a
+        distinct skill with a distinct soul — a reviewer whose whole job is to disbelieve
+        gets better at it, and its memory accumulates failure patterns rather than
+        construction habits. Round-robin among peers spreads that learning too thin.
+
+        Resolution order:
+          1. A `role: qa` agent whose `owns` overlaps the builder's `owns` — the pillar's
+             own reviewer.
+          2. Any other `role: qa` agent — review skill beats topic familiarity.
+          3. Any other active agent — a small team still gets adversarial review.
+
+        Deterministic tie-break by name, so runs are reproducible.
         """
-        candidates = [
-            r["name"] for r in self.storage.list_agents()
-            if r["name"] != exclude and r["status"] == "active"
-        ]
-        if not candidates:
+        rows = [r for r in self.storage.list_agents()
+                if r["name"] != exclude and r["status"] == "active"]
+        if not rows:
             raise RuntimeError(
                 f"no eligible tester for {exclude!r}: a team needs at least two agents "
                 "so no agent grades its own work"
             )
-        return sorted(candidates)[0]
+
+        builder_owns = {o.lower() for o in (self.goals(exclude) or {}).get("owns", [])}
+        qa_rows = [r for r in rows if r["role"] == "qa"]
+
+        pillar_qa = [
+            r["name"] for r in qa_rows
+            if builder_owns & {o.lower() for o in (self.goals(r["name"]) or {}).get("owns", [])}
+        ]
+        if pillar_qa:
+            return sorted(pillar_qa)[0]
+        if qa_rows:
+            return sorted(r["name"] for r in qa_rows)[0]
+        return sorted(r["name"] for r in rows)[0]
 
     # -- misc -------------------------------------------------------------- #
     def config(self, agent: str) -> Optional[AgentConfig]:

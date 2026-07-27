@@ -23,10 +23,11 @@ log = logging.getLogger("teleraft.runner")
 
 
 class LiveRunner:
-    def __init__(self, client, gateway: Gateway, config):
+    def __init__(self, client, gateway: Gateway, config, scheduler=None):
         self.client = client
         self.gateway = gateway
         self.config = config
+        self.scheduler = scheduler
         self.group_chat_id = str(config.group_chat_id)
         self.thread_to_topic = config.thread_to_topic()
         self.username_to_agent = config.username_to_agent()
@@ -85,6 +86,9 @@ class LiveRunner:
                 if name in self.agent_names:
                     found.append(name)
         # Also accept a plain "@Name" that matches an agent's display name directly.
+        # This is what makes **puppet mode** work: with one workspace bot and no
+        # per-agent bot accounts, `@Quinn` is not a real Telegram username, so display
+        # name matching is the only route from a mention to an agent (§12, decided).
         for name in self.agent_names:
             if f"@{name.lower()}" in text.lower() and name not in found:
                 found.append(name)
@@ -164,3 +168,10 @@ class LiveRunner:
             for upd in updates:
                 self._offset = max(self._offset, upd["update_id"] + 1)
                 self.process_update(upd)
+
+            # Programs tick on the same loop: getUpdates already blocks for the poll
+            # timeout, so this costs nothing and needs no second thread.
+            if self.scheduler is not None:
+                report = self.scheduler.tick()
+                if report.fired or report.failed:
+                    log.info("scheduler: %s", report.summary())

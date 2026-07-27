@@ -98,7 +98,11 @@ def main() -> None:
         if report["status"] == "error":
             logging.warning("knowledge source %s (%s) is unhealthy: %s",
                             report["id"], report["uri"], report["error"])
-    runner = LiveRunner(client, app.gateway, cfg)
+    logging.info("bot mode: %s", cfg.bot_mode)
+    for program in sorted(app.scheduler.programs(), key=lambda p: p.name):
+        logging.info("program %s (%s) owned by %s", program.name, program.cron, program.agent)
+
+    runner = LiveRunner(client, app.gateway, cfg, scheduler=app.scheduler)
     try:
         runner.run_forever()
     except KeyboardInterrupt:

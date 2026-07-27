@@ -13,6 +13,12 @@ group_chat_id = "-1001234567890"
 # Broadcast channel for the activity feed / daily digest. Channel id ("-100…") or "@handle".
 channel_id = "@your_teleraft_feed"
 
+# Bot topology. "puppet" (default) runs the whole team on the workspace bot -- one
+# BotFather step, agents attributed by name in the message text. "per_agent" gives each
+# agent its own bot account (avatars, DMs, native @mentions) and requires the
+# [telegram.agent_usernames] table below.
+bot_mode = "puppet"
+
 # Numeric Telegram user ids allowed to approve/reject gates (humans only).
 # Find yours by messaging @userinfobot.
 human_ids = ["11111111"]
@@ -26,7 +32,8 @@ human_ids = ["11111111"]
 "# finance"  = "4"
 "# admin"    = "5"
 
-# Agent display name → its bot @username, for @mention routing.
+# Agent display name → its bot @username. Required only for bot_mode = "per_agent";
+# in puppet mode "@Quinn" resolves by display name.
 [telegram.agent_usernames]
 Cole = "@Cole_TR_Bot"
 Ray  = "@Ray_TR_Bot"

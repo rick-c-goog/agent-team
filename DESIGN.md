@@ -1331,60 +1331,38 @@ the mistake structurally can't repeat.
 
 ## 9. Implementation Plan
 
-**Phase 0 — Foundation (wk 1–2).** Workspace bot + one agent bot via BotFather;
-gateway/webhooks; supergroup + forum topics + broadcast channel setup; Postgres
-schema; task cards with claim buttons.
+Status against the reference implementation in this repository. Marked honestly: a phase
+is **done** only if it runs and is covered by tests.
 
-**Phase 1 — Graph engine (wk 3–4).** RunState + checkpointing; Planner/Orchestrator/
-Builder/Tester nodes on the Claude Agent SDK; human-gate interrupts wired to inline
-callbacks; run traces.
+| Phase | Scope | Status |
+|---|---|---|
+| **0 — Foundation** | Workspace bot, gateway, topics, storage, task cards with claim buttons | ✅ done |
+| **1 — Graph engine** | `RunState` + checkpointing, POBT nodes, human-gate interrupts, run traces | ✅ done |
+| **2 — Computers & runtimes** | Per-agent runtime routing (mock / Claude / quant), crash recovery, identity-preserving swap | ⚠️ partial — runtimes and routing done; the **remote computer daemon and device login are not built**, so every agent runs in the server process |
+| **3 — Knowledge base & RAG** | Extractors, web/Drive/file connectors, chunking with locators, retrieval into the loop, citations, grounding checks, `/kb` | ✅ done |
+| **4 — Memory & learning** | Recall, Learn writeback, soul amendments, **weekly consolidation** | ✅ done |
+| **5 — Host integration & onboarding** | `OnboardingHost` adapters, interview → plan → approve → idempotent apply, **Programs actually firing** | ✅ done |
+| **5b — Staged pipelines** | The DAG of §5.7: four node kinds, joins, artifact survival, statistical gates, trial ledger | ⛔ not started — design only |
+| **5c — Evaluation & operations** | Trace replay, per-gate fixture suites, process metrics (§5.9) | ⛔ not started |
+| **6 — Surfaces & polish** | Text board ✅, digest, rate-limit hardening; **Mini App** kanban/console | ⚠️ partial — `/board` ships; the Mini App is not built |
 
-**Phase 2 — Computers & runtimes (wk 5–6).** Daemon with device login; Claude Agent
-SDK runtime first, CLI runtimes (Claude Code, Codex CLI) behind a common adapter;
-crash recovery; runtime swap preserving identity.
+### 9.1 What each remaining phase needs
 
-**Phase 3 — Knowledge base & RAG (wk 7–8).** Knowledge Service: source registry;
-extractors for `.md`, `.pdf`, `.txt`, `.csv` and HTML; web crawl and Google Drive
-(read-only) connectors; chunking with locators; pluggable embeddings with an offline
-lexical fallback; `retrieve()` wired into Intake/Plan/Build; `citations[]` on artifacts
-and grounding checks in Test; `/kb` commands; incremental sync + source health.
+**Phase 2 (finish).** A daemon with device login so agents can run on a laptop or VM
+separate from the server, with the runtime's credentials staying on that machine. Today
+`runtime_engine` selects an in-process runtime; the interface is already the right shape,
+so this is deployment work rather than redesign.
 
-**Phase 4 — Memory & learning (wk 9–10).** Memory service + embedding recall; Learn
-node writeback; soul-amendment proposals.
+**Phase 5b.** The largest remaining piece and the one with the most design risk — §5.1's
+caution applies to it directly: build it when a pipeline's shape has been observed, not
+before. The gates are ordinary reviewed code; the trial ledger lands with them, because a
+pipeline that reports significance without a trial count is confidently wrong.
 
-**Phase 5 — Host integration & onboarding agent (wk 11–12).** `OnboardingHost` adapter
-for Hermes Agent and OpenClaw; heartbeats registered via `schedule()`; the interview →
-`workspace.plan.yaml` → approve → idempotent apply flow, run as a real POBT graph run
-with the Tester verifying the provisioned workspace.
+**Phase 5c.** The highest-value next build regardless of domain. Until replay exists,
+every change to a soul, a role prompt, or a threshold is an unfalsifiable opinion.
 
-**Phase 5b — Staged pipelines (wk 12–13).** The pipeline DAG over existing runs
-(§5.7.2): four node kinds, typed handoff, per-node criteria and checker, terminal kill
-with recorded reason, artifacts that outlive killed items, resumable mid-graph. The
-join node's barrier semantics and the empty-surviving-set path are part of this phase,
-not afterthoughts — a portfolio constructor that cannot return "nothing survived" will be
-tuned until it never has to. Then the statistical gates as ordinary reviewed
-code — Newey–West standard errors, bootstrap resampling, IS/OOS degradation, a regime
-segmentation, factor attribution — each of which **blocks rather than passes** when its
-inputs are unavailable. The trial ledger and the trials-aware correction (§5.7.4) land
-with this phase, not after it: a pipeline that reports significance without a trial count
-is worse than no pipeline, because it is confidently wrong.
-
-**Phase 5c — Evaluation & operations (wk 13).** Trace replay against changed souls and
-role prompts, fixture suites per gate, and the process metrics of §5.9 (cost and latency
-per task, failure rate by node, human intervention rate). Without these, every later
-change to a prompt or a threshold is an unfalsifiable opinion.
-
-**Phase 6 — Mini App & polish (wk 13–14).** Kanban board, agent console, knowledge
-browser + retrieval preview, run-trace viewer; daily digest; rate-limit hardening.
-
-**Phase 7 — Team rollout (wk 15+).** One pillar agent per week: June → Cole → Etta →
-Ray → Penn, tuning each feedback loop before adding the next.
-
-*Why onboarding lands late:* it can only provision primitives that already exist, so it
-is built after agents, topics, knowledge, and schedules work. Until Phase 5, setup is the
-documented manual path (`docs/TELEGRAM_SETUP.md`) — which doubles as the specification
-the onboarding agent automates, and as the fallback when someone prefers to configure by
-hand.
+**Phase 6.** The text board covers the need; the Mini App is a richer view of data that
+already exists, so it is genuinely optional rather than blocking.
 
 ---
 
@@ -1514,55 +1492,36 @@ These limits are part of the design, not advice layered on top:
 
 ---
 
-## 12. Open Questions
+## 12. Decisions
 
-1. **Bot provisioning UX** — BotFather is manual; a guided admin-console flow is
-   planned, but is a single-bot "puppet" mode worth offering for quick trials?
-2. **Cross-workspace agents** — can one agent identity serve two supergroups
-   (Raft-style joint channels), or is identity strictly per-workspace in v1?
-3. **Tester assignment policy** — round-robin among peers vs. a dedicated QA agent
-   per pillar; start with "any peer whose goals overlap, never the builder."
-4. **Memory pruning** — memories grow monotonically; when do we summarize/expire?
-   Proposal: monthly consolidation task run by each agent on itself, human-reviewed.
-5. **Cost attribution** — runs consume the computer owner's runtime subscription;
-   do we need per-agent token budgets surfaced in the digest from day one?
-6. **Default onboarding host** — Hermes Agent (best scheduler) vs OpenClaw (best channel
-   reach). We default to Hermes; should a workspace be able to run *both* — Hermes for
-   heartbeats, OpenClaw for multi-channel access — or does that double the failure modes?
-7. **Embedding provider** — hosted embeddings give the best recall but send document text
-   to a third party. Offer a local embedding model for sensitive corpora, or restrict
-   sensitive sources to the lexical index only?
-8. **Knowledge sharing granularity** — `scope: agent | team` may be too coarse. Do we need
-   per-topic or per-role scoping (e.g. "all delivery agents") before it becomes painful?
-9. **Retrieval budget vs. quality** — how much of each run's token budget should knowledge
-   consume, and should the Orchestrator be allowed to spend more on a re-plan after a
-   grounding rejection?
-10. **Stale-source policy** — if a source hasn't synced successfully in N days, should
-    affected tasks be blocked, or proceed with a loud warning on the review card?
-11. **Which trials-aware correction** (§5.7.4) — deflated Sharpe using the trial count is
-    the most direct, false-discovery-rate control the most standard. They answer slightly
-    different questions; do we report both, and what do we do about trials from an earlier
-    epoch when the universe or cost model has since changed?
-12. **Does the trial ledger ever reset?** Counting every hypothesis since inception makes
-    the correction increasingly punishing, which is arguably correct and arguably makes
-    the desk useless after a year. Roll the window, or segment by universe?
-13. **Regime segmentation method** — a hidden Markov model is the literature's answer and
-    is expensive and fiddly; volatility terciles are transparent and crude. Start crude
-    and state the crudeness, or start with the HMM?
-14. **Node granularity** — eleven nodes is the source's decomposition, not a law. One
-    factor per producer is clean but means seven near-identical POBT runs; is a single
-    parameterised producer over a factor list better, and does that cost the per-factor
-    audit trail?
-15. **Where do benchmark factors come from** (§5.7.6) — a published series keeps the
-    attribution honest but adds a licensing and availability dependency, and its universe
-    may not match ours. Do we require an exact-universe benchmark, or accept the mismatch
-    and report it?
-16. **What if all factors die** (§5.7.3) — the graph should report a well-argued nothing.
-    Does that reach the human as a normal result, or should a run of consecutive empty
-    portfolios trigger a review of the gates themselves rather than of the factors?
-17. **Pipelines beyond research** — the abstraction is domain-neutral (§5.7.2). Is a
-    second worked example (a content or compliance funnel) worth carrying in the design,
-    or does that dilute it?
+Recorded so a later change is a deliberate reversal rather than drift. Each is enforced
+by a test in `tests/test_decisions.py`.
+
+| # | Question | Decision | Rationale |
+|---|---|---|---|
+| 1 | Bot provisioning UX | **Puppet mode is the default**; per-agent bots opt-in | One BotFather step gets a team running in minutes. `bot_mode="per_agent"` buys real avatars, DMs and native @mentions, and requires `agent_usernames` — validated at startup rather than failing on the first mention. |
+| 2 | Cross-workspace agents | **Identity is per-workspace in v1** | Joint channels need cross-workspace ACLs, memory partitioning, and a story for whose soul amendments apply. Deferred rather than half-built. |
+| 3 | Tester assignment | **Dedicated QA agent per pillar** (`role: qa`) | Review is a distinct skill; a reviewer whose whole job is to disbelieve gets better at it, and its memory accumulates failure patterns instead of construction habits. Falls back to any QA agent, then any peer, so a two-agent team still gets adversarial review. |
+| 4 | Memory pruning | **Weekly, automated, unattended** (Sunday 04:00) | Merges only near-identical notes and caps total size oldest-first. Nothing here needs judgement, so nothing here needs a human — and monthly is too slow to stop restatements crowding out distinct lessons at recall time. |
+| 5 | Cost attribution | **Not in the digest for v1** | Runs consume the computer owner's own subscription. Per-agent budgets exist in `Budget` and bound runs; surfacing them per agent is reporting, and reporting can wait. |
+| 6 | Default onboarding host | **Hermes only** | Its scheduler is the heartbeat substrate. Running Hermes *and* OpenClaw doubles the failure modes for reach nobody has asked for yet. |
+| 7 | Embedding provider | **`sensitive: true` pins a source to local embedding** | Confidential text is never sent to a hosted embedder. Recall is somewhat worse; shipping a contract to a third party for a better vector is not a trade to make silently on the operator's behalf. |
+| 8 | Knowledge scoping | **`agent \| team` stands for v1** | Per-topic and per-role scoping is speculative until a real team feels the pain and can say which axis hurts. |
+| 9 | Retrieval budget | **Widen retrieval after a grounding rejection** | The previous attempt failed for lack of evidence; retrying with the same `k` retries the same failure. Only grounding rejections earn the extra budget — a tone complaint does not. |
+| 10 | Stale sources | **Warn loudly on the review card, never block** | Blocking stops a desk because a nightly crawl failed. A human reading "these numbers rest on a 9-day-old source" judges that better than a threshold can. |
+
+**Quant-specific decisions** (Appendix A; the pipeline itself is deferred to its own
+tutorial):
+
+| # | Question | Decision |
+|---|---|---|
+| 11 | Trials-aware correction | Report **both** — deflated Sharpe (direct, uses the trial count) and FDR (standard, controls the batch). They answer different questions; reporting one invites the reader to assume the other. Trials from a superseded universe or cost model are excluded from the count and the exclusion is stated. |
+| 12 | Trial ledger reset | **Rolling window.** Counting since inception makes the correction monotonically punishing and eventually useless; a rolling window keeps it honest about the *current* search intensity. |
+| 13 | Regime segmentation | **Start crude** — volatility terciles — and label the crudeness on every result. An HMM is the literature's answer and can replace it once the pipeline is worth that fiddliness. |
+| 14 | Node granularity | **One parameterised producer over a factor list**, not seven near-identical nodes. Per-factor audit is preserved by emitting one artifact and one gate record per factor, so the trail survives the consolidation. |
+| 15 | Benchmark factors | **Accept universe mismatch and report it.** An exact-universe benchmark is often unobtainable; a stated mismatch is honest, a silent one is not, and refusing to attribute at all is worse than attributing with a caveat. |
+| 16 | All factors die | **A normal result**, reported as a finding with what killed each. *Judgement call:* three consecutive empty runs escalate to `# admin` as a review of the **gates**, not the factors — persistent emptiness is more likely a mis-calibrated threshold than a market with no structure. |
+| 17 | Second worked example | **No.** A second domain dilutes; §5.7.3's shape table carries the domain-neutrality claim without the bulk. |
 
 ---
 

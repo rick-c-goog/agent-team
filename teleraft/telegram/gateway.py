@@ -563,12 +563,29 @@ class Gateway:
         if artifact and artifact.citations:
             text += "\n📚 Sources: " + mono(" · ".join(c.render()
                                                       for c in artifact.citations))
+        # Stale evidence warns loudly rather than blocking (DESIGN.md §12, decided) —
+        # the reviewer is the right judge of whether a 9-day-old source still holds.
+        for warning in self._stale_source_warnings():
+            text += f"\n⚠️ {warning}"
         mid = self.client.send_message(self.group_chat_id, text, buttons=buttons,
                                        thread=self._thread(task))
         # Remember the gate card so its buttons can be retired once a human decides —
         # live buttons on a settled gate invite a second tap that can only error.
         self._gate_cards[run_id] = (mid, text)
         self.client.send_channel(f"👀 Review needed: #{esc(task['id'])} {esc(task['title'])}")
+
+    def _stale_source_warnings(self, limit: int = 3) -> list[str]:
+        if self.knowledge is None:
+            return []
+        try:
+            stale = self.knowledge.stale_or_failing()
+        except Exception:
+            return []
+        warnings = [f"Stale evidence: {esc(s['uri'])} — {esc(s['why'])}"
+                    for s in stale[:limit]]
+        if len(stale) > limit:
+            warnings.append(f"…and {len(stale) - limit} more stale source(s) — /kb list")
+        return warnings
 
     def _notify_failed(self, run_id, task_id, node, agent, error):
         """A run crashed. Say so in the thread — silence looks like a hung task."""

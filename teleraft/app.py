@@ -17,6 +17,7 @@ from .agents.registry import Registry, load_agents_from_dir
 from .graph.engine import GraphEngine
 from .knowledge.service import KnowledgeService
 from .memory.service import MemoryService
+from .programs import Program, Scheduler
 from .quant.hypothesis import HypothesisRegistry
 from .runtime.base import Runtime
 from .runtime.mock import MockRuntime
@@ -29,6 +30,9 @@ from .telegram.gateway import Gateway
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_AGENTS_DIR = str(_REPO_ROOT / "agents")
 DEFAULT_KNOWLEDGE_ROOT = str(_REPO_ROOT)
+
+# Sunday 04:00 — weekly and unattended (DESIGN.md §12, decided).
+MEMORY_CONSOLIDATION_CRON = "0 4 * * 0"
 
 
 class App:
@@ -96,6 +100,59 @@ class App:
 
         # Register each agent's declared knowledge sources and do the first ingest.
         self.register_agent_knowledge(agent_configs, sync=sync_knowledge)
+
+        # Programs: the scheduler that actually fires heartbeats and maintenance work.
+        self.scheduler = Scheduler(self.storage)
+        self.register_programs(agent_configs)
+
+    # ------------------------------------------------------------------ #
+    def register_programs(self, agent_configs) -> None:
+        """Register the platform's own Programs plus each agent's heartbeats (§5.6)."""
+        # Weekly, unattended memory consolidation (DESIGN.md §12, decided). Sunday 04:00
+        # is chosen to sit outside the weekday heartbeats so a long consolidation cannot
+        # collide with real work.
+        self.scheduler.register(Program(
+            name="memory-consolidation",
+            cron=MEMORY_CONSOLIDATION_CRON,
+            body=self.consolidate_memories,
+            agent="platform",
+        ))
+
+        for cfg in agent_configs:
+            for i, hb in enumerate(cfg.heartbeats):
+                if not hb.cron:
+                    continue
+                self.scheduler.register(Program(
+                    name=f"heartbeat:{cfg.name}:{i}",
+                    cron=hb.cron,
+                    agent=cfg.name,
+                    body=self._heartbeat_body(cfg.name, hb.prompt),
+                ))
+
+    def _heartbeat_body(self, agent: str, prompt: str):
+        """A heartbeat opens a normal task, so it is claimed, gated and audited like
+        any other work — autonomy must not mean a private code path (§5.6)."""
+        def run():
+            topic = next(
+                (o for o in (self.registry.goals(agent) or {}).get("owns", [])
+                 if isinstance(o, str) and o.startswith("#")),
+                "general",
+            )
+            task_id = self.tasks.create(topic=topic, title=prompt, body="",
+                                        created_by=f"heartbeat:{agent}")
+            self.gateway._post_task_card(task_id, claimable=False)
+            return self.gateway._run_task(task_id, agent)
+        return run
+
+    def consolidate_memories(self) -> list[dict]:
+        reports = self.memory.consolidate_all(self.registry.names())
+        touched = [r for r in reports if r["merged"] or r["dropped"]]
+        if touched and self.gateway.client is not None:
+            summary = " · ".join(
+                f"{r['agent']}: {r['before']}→{r['after']}" for r in touched
+            )
+            self.gateway.client.send_channel(f"🧹 Memory consolidated — {summary}")
+        return reports
 
     def _default_runtime_for(self, agent_configs):
         """Map each agent to a runtime by its declared `runtime.engine`.

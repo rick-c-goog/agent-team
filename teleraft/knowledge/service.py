@@ -62,10 +62,22 @@ class KnowledgeService:
         embedding: Optional[EmbeddingProvider] = None,
         fetchers: Optional[FetcherRegistry] = None,
         knowledge_root: str = ".",
+        local_embedding: Optional[EmbeddingProvider] = None,
     ):
         self.storage = storage
+        # `embedding` may be a hosted provider; `local_embedding` never leaves the host
+        # and is used for sources marked sensitive (DESIGN.md §12).
         self.embedding = embedding or HashingEmbedding()
+        self.local_embedding = local_embedding or HashingEmbedding()
         self.fetchers = fetchers or FetcherRegistry(knowledge_root=knowledge_root)
+
+    def embedder_for(self, sensitive: bool) -> EmbeddingProvider:
+        """Sensitive text is embedded locally, always — never sent to a hosted API."""
+        return self.local_embedding if sensitive else self.embedding
+
+    def is_hosted(self) -> bool:
+        """True when the default embedder would send text off-host."""
+        return self.embedding is not self.local_embedding
 
     # ------------------------------------------------------------------ #
     # Source registry
@@ -80,8 +92,16 @@ class KnowledgeService:
         options: Optional[dict] = None,
         refresh_cron: Optional[str] = None,
         created_by: str = "system",
+        sensitive: bool = False,
     ) -> str:
-        """Register a source. Idempotent per (agent, uri) so re-running setup is safe."""
+        """Register a source. Idempotent per (agent, uri) so re-running setup is safe.
+
+        `sensitive=True` pins the source to the **local** embedding path: its text is
+        never sent to a hosted embedding provider (DESIGN.md §12, decided). Recall is
+        somewhat worse; the alternative is shipping confidential documents to a third
+        party to get a better vector, which is not a trade the platform should make
+        silently on the operator's behalf.
+        """
         owner = None if scope == "team" else agent
         existing = self.storage.find_source(owner, uri)
         if existing:
@@ -89,7 +109,7 @@ class KnowledgeService:
         source_id = "src_" + uuid.uuid4().hex[:10]
         self.storage.add_source(
             source_id, owner, scope, type_, uri,
-            json.dumps(options or {}), refresh_cron, created_by,
+            json.dumps(options or {}), refresh_cron, created_by, sensitive,
         )
         return source_id
 
@@ -113,7 +133,27 @@ class KnowledgeService:
                 "docs": len(self.storage.docs_for_source(row["id"])),
                 "chunks": self.storage.count_chunks(row["id"]),
                 "last_synced_at": row["last_synced_at"],
+                "sensitive": bool(row["sensitive"]),
+                "stale_days": _stale_days(row["last_synced_at"]),
             })
+        return out
+
+    def stale_or_failing(self, stale_after_days: float = 7.0) -> list[dict]:
+        """Sources whose evidence a reviewer should not fully trust yet.
+
+        DESIGN.md §12 (decided): a stale source **warns loudly on the review card** and
+        does not block. Blocking would stop a desk because a nightly crawl failed, and a
+        human reading "these numbers rest on a 9-day-old source" can judge that better
+        than a threshold can.
+        """
+        out = []
+        for h in self.health():
+            if h["status"] == "error":
+                out.append({**h, "why": f"last sync failed: {h['error'][:120]}"})
+            elif h["stale_days"] is None:
+                out.append({**h, "why": "never synced"})
+            elif h["stale_days"] > stale_after_days:
+                out.append({**h, "why": f"last synced {h['stale_days']:.0f} days ago"})
         return out
 
     # ------------------------------------------------------------------ #
@@ -156,7 +196,7 @@ class KnowledgeService:
 
             self.storage.upsert_doc(doc_id, source_id, doc.external_id, doc.title,
                                     doc.mime, content_hash, len(doc.data))
-            rows = self._chunk_and_embed(segments)
+            rows = self._chunk_and_embed(segments, sensitive=bool(source["sensitive"]))
             self.storage.replace_chunks(doc_id, rows)
             report.docs_indexed += 1
             report.chunks += len(rows)
@@ -182,7 +222,8 @@ class KnowledgeService:
         rows = self.storage.sources_for(agent) if agent else self.storage.list_sources()
         return [self.sync_source(r["id"]) for r in rows]
 
-    def _chunk_and_embed(self, segments) -> list[tuple[str, str, int, str]]:
+    def _chunk_and_embed(self, segments, sensitive: bool = False
+                         ) -> list[tuple[str, str, int, str]]:
         texts: list[str] = []
         locators: list[str] = []
         for seg in segments:
@@ -191,7 +232,7 @@ class KnowledgeService:
                 locators.append(seg.locator)
         if not texts:
             return []
-        vectors = self.embedding.embed(texts)
+        vectors = self.embedder_for(sensitive).embed(texts)
         return [
             (text, loc, approx_tokens(text), json.dumps(vec))
             for text, loc, vec in zip(texts, locators, vectors)
@@ -210,6 +251,8 @@ class KnowledgeService:
             return []
 
         qvec = self.embedding.embed([query])[0]
+        qvec_local = self.local_embedding.embed([query])[0] if self.is_hosted() else qvec
+        sensitive_sources = {r["id"] for r in self.storage.list_sources() if r["sensitive"]}
         qterms = set(tokenize(query))
         team_sources = {
             r["id"] for r in self.storage.list_sources() if r["scope"] == "team"
@@ -221,7 +264,9 @@ class KnowledgeService:
                 vec = json.loads(row["embedding"]) if row["embedding"] else []
             except (TypeError, ValueError):
                 vec = []
-            score = W_VECTOR * cosine(qvec, vec) + W_KEYWORD * keyword_overlap(qterms, row["text"])
+            # Compare against the vector space the chunk was actually embedded in.
+            q = qvec_local if row["source_id"] in sensitive_sources else qvec
+            score = W_VECTOR * cosine(q, vec) + W_KEYWORD * keyword_overlap(qterms, row["text"])
             if score <= 0:
                 continue
             if row["source_id"] in team_sources:
@@ -250,6 +295,14 @@ class KnowledgeService:
             if len(out) >= k:
                 break
         return out
+
+
+def _stale_days(last_synced_at) -> Optional[float]:
+    if not last_synced_at:
+        return None
+    import time
+
+    return round(max(0.0, (time.time() - float(last_synced_at)) / 86400.0), 2)
 
 
 def _doc_id(source_id: str, external_id: str) -> str:

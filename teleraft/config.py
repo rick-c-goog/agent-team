@@ -27,6 +27,11 @@ class Config:
     # --- forum topics ↔ thread ids --------------------------------------------
     # label shown in the app  →  message_thread_id of that forum topic
     topic_threads: dict[str, str] = field(default_factory=dict)
+    # --- bot topology (DESIGN.md §3.2, §12 decision) ---------------------------
+    # "puppet": the workspace bot speaks for every agent, attributing each message by
+    # name. One BotFather step, so a team can be tried in minutes.
+    # "per_agent": each agent has its own bot account — real avatars, DMs, @mentions.
+    bot_mode: str = "puppet"
     # --- optional full multi-bot topology -------------------------------------
     # agent name → its bot username ("@Cole_TR_Bot") for @mention routing
     agent_usernames: dict[str, str] = field(default_factory=dict)
@@ -94,6 +99,7 @@ def load_config(path: str | os.PathLike = "teleraft.toml") -> Config:
         cfg.topic_threads = {k: str(v) for k, v in tg.get("topic_threads", {}).items()}
         cfg.agent_usernames = dict(tg.get("agent_usernames", {}))
         cfg.agent_bot_tokens = dict(tg.get("agent_bot_tokens", {}))
+        cfg.bot_mode = str(tg.get("bot_mode", cfg.bot_mode)).strip().lower()
         cfg.poll_timeout = int(tg.get("poll_timeout", cfg.poll_timeout))
 
         app = data.get("app", {})
@@ -126,5 +132,17 @@ def load_config(path: str | os.PathLike = "teleraft.toml") -> Config:
     cfg.onboarding_host = env.get("TELERAFT_ONBOARDING_HOST", cfg.onboarding_host)
     cfg.host_gateway_url = env.get("TELERAFT_HOST_GATEWAY_URL", cfg.host_gateway_url)
     cfg.host_api_key = env.get("TELERAFT_HOST_API_KEY", cfg.host_api_key)
+    cfg.bot_mode = env.get("TELERAFT_BOT_MODE", cfg.bot_mode).strip().lower()
 
+    if cfg.bot_mode not in ("puppet", "per_agent"):
+        raise ValueError(
+            f"bot_mode must be 'puppet' or 'per_agent', got {cfg.bot_mode!r}"
+        )
+    # per_agent needs the usernames to route @mentions; puppet resolves by display name.
+    if cfg.bot_mode == "per_agent" and not cfg.agent_usernames:
+        raise ValueError(
+            "bot_mode='per_agent' needs [telegram.agent_usernames] mapping each agent to "
+            "its @bot_username — or use bot_mode='puppet' to run the whole team on the "
+            "workspace bot (see docs/TELEGRAM_SETUP.md §3.3)"
+        )
     return cfg
