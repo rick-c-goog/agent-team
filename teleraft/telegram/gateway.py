@@ -99,6 +99,7 @@ class Gateway:
         self.knowledge = None    # optional KnowledgeService for /kb commands
         self.hypotheses = None   # optional HypothesisRegistry for /hyp commands
         self.bot_username = ""   # set by the runner after getMe, to avoid self-replies
+        self.pipelines = None    # optional PipelineEngine for /pipeline
         # run_id → (gate message id, text), so a decided gate can drop its buttons.
         self._gate_cards: dict[str, tuple[str, str]] = {}
 
@@ -110,6 +111,9 @@ class Gateway:
 
     def attach_hypotheses(self, registry) -> None:
         self.hypotheses = registry
+
+    def attach_pipelines(self, engine) -> None:
+        self.pipelines = engine
 
     # ================================================================== #
     # Inbound
@@ -123,6 +127,10 @@ class Gateway:
 
         if u.text.strip().startswith("/board"):
             return self.handle_board_command(u)
+        if u.text.strip().startswith("/metrics"):
+            return self.handle_metrics_command(u)
+        if u.text.strip().startswith("/pipeline"):
+            return self.handle_pipeline_command(u)
 
         if u.text.strip().startswith(("/agents", "/help")):
             return self.handle_help_command(u)
@@ -240,6 +248,38 @@ class Gateway:
         self.client.send_message(self.group_chat_id, "\n".join(lines), thread=thread)
         return columns
 
+    # -- /metrics · /pipeline (DESIGN.md §5.9, §5.7) ----------------------- #
+    def handle_metrics_command(self, u: Update):
+        """Process metrics — cost, failures, and how often a human has to step in."""
+        from ..evaluation import collect
+
+        m = collect(self.storage)
+        lines = [bold("📈 Process metrics")] + [f"  {esc(l)}" for l in m.summary_lines()]
+        self.client.send_message(self.group_chat_id, "\n".join(lines), thread=u.topic)
+        return m
+
+    def handle_pipeline_command(self, u: Update):
+        """`/pipeline` — recent pipeline runs and what each gate killed."""
+        runs = self.storage.list_pipeline_runs(limit=5)
+        if not runs:
+            self.client.send_message(
+                self.group_chat_id,
+                "🧪 No pipeline runs yet.", thread=u.topic)
+            return []
+
+        lines = [bold("🧪 Pipeline runs")]
+        for run in runs:
+            mark = {"done": "🟢", "failed": "🔴"}.get(run["status"], "🔵")
+            lines.append(f"{mark} {mono(run['id'])} {esc(run['pipeline'])} — "
+                         f"{esc(run['summary'] or run['status'])}")
+            for item in self.storage.pipeline_items(run["id"]):
+                if item["status"] in ("killed", "blocked"):
+                    lines.append(f"    ✗ {esc(item['subject'])} at "
+                                 f"{esc(item['killed_at_node'] or '?')}: "
+                                 f"{esc((item['kill_reason'] or '')[:110])}")
+        self.client.send_message(self.group_chat_id, "\n".join(lines), thread=u.topic)
+        return runs
+
     # -- /agents · /help --------------------------------------------------- #
     def handle_help_command(self, u: Update):
         """Show who is on the team and what they own — the first thing to check when
@@ -266,7 +306,8 @@ class Gateway:
         lines += [
             "",
             bold("Commands") + f": {mono('/task <what to do>')} · {mono('/board')} "
-            f"· {mono('/agents')} · {mono('/kb list')} · {mono('/hyp list')}",
+            f"· {mono('/agents')} · {mono('/kb list')} · {mono('/hyp list')} "
+            f"· {mono('/pipeline')} · {mono('/metrics')}",
             f"Address an agent directly: {mono('@Name <what to do>')}",
         ]
         self.client.send_message(self.group_chat_id, "\n".join(lines), thread=u.topic)

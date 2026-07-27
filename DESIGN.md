@@ -1342,8 +1342,8 @@ is **done** only if it runs and is covered by tests.
 | **3 — Knowledge base & RAG** | Extractors, web/Drive/file connectors, chunking with locators, retrieval into the loop, citations, grounding checks, `/kb` | ✅ done |
 | **4 — Memory & learning** | Recall, Learn writeback, soul amendments, **weekly consolidation** | ✅ done |
 | **5 — Host integration & onboarding** | `OnboardingHost` adapters, interview → plan → approve → idempotent apply, **Programs actually firing** | ✅ done |
-| **5b — Staged pipelines** | The DAG of §5.7: four node kinds, joins, artifact survival, statistical gates, trial ledger | ⛔ not started — design only |
-| **5c — Evaluation & operations** | Trace replay, per-gate fixture suites, process metrics (§5.9) | ⛔ not started |
+| **5b — Staged pipelines** | The DAG of §5.7: four node kinds, joins, artifact survival, trial ledger, selection gate | ✅ done — domain-neutral engine + `/pipeline`; the *statistical* gates themselves are per-domain and ship with a pipeline, not with the platform |
+| **5c — Evaluation & operations** | Trace replay, per-gate fixture suites, process metrics (§5.9) | ✅ done — `replay_run`, `run_fixtures`, `/metrics` |
 | **6 — Surfaces & polish** | Text board ✅, digest, rate-limit hardening; **Mini App** kanban/console | ⚠️ partial — `/board` ships; the Mini App is not built |
 
 ### 9.1 What each remaining phase needs
@@ -1353,13 +1353,20 @@ separate from the server, with the runtime's credentials staying on that machine
 `runtime_engine` selects an in-process runtime; the interface is already the right shape,
 so this is deployment work rather than redesign.
 
-**Phase 5b.** The largest remaining piece and the one with the most design risk — §5.1's
-caution applies to it directly: build it when a pipeline's shape has been observed, not
-before. The gates are ordinary reviewed code; the trial ledger lands with them, because a
-pipeline that reports significance without a trial count is confidently wrong.
+**Phase 5b (shipped, with a boundary).** The engine is domain-neutral: node kinds,
+per-item gates, the join barrier, artifact survival, `cannot_evaluate` blocking, and the
+empty-survivor path. The **selection gate** ships with it — Benjamini–Hochberg and a
+deflated statistic over a rolling trial window — because a pipeline that reports
+significance without a trial count is confidently wrong. What deliberately does *not*
+ship here: the domain estimators (Newey–West, bootstrap, regime segmentation, factor
+attribution). Those belong to a pipeline, not to the platform, and §5.1's caution applies
+— build a gate when its shape has been observed.
 
-**Phase 5c.** The highest-value next build regardless of domain. Until replay exists,
-every change to a soul, a role prompt, or a threshold is an unfalsifiable opinion.
+**Phase 5c (shipped).** `replay_run` re-executes a recorded run in a scratch workspace —
+no Telegram traffic, no memory writes — so a changed soul, prompt, or threshold can be
+attributed rather than believed. Fixtures are regression tests for *judgement*, and they
+report **misses** (let bad work through) separately from **false alarms**, because tuning
+a checker until it rejects everything is not an improvement.
 
 **Phase 6.** The text board covers the need; the Mini App is a richer view of data that
 already exists, so it is genuinely optional rather than blocking.

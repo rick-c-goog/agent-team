@@ -196,6 +196,69 @@ CREATE TABLE IF NOT EXISTS backtest_result (
     created_at REAL NOT NULL
 );
 
+-- §5.7 Pipelines: a DAG of gated runs ----------------------------------------
+CREATE TABLE IF NOT EXISTS pipeline_run (
+    id TEXT PRIMARY KEY,
+    pipeline TEXT NOT NULL,
+    status TEXT NOT NULL,          -- running | done | failed
+    started_at REAL NOT NULL,
+    finished_at REAL,
+    summary TEXT
+);
+
+CREATE TABLE IF NOT EXISTS pipeline_item (
+    id TEXT PRIMARY KEY,
+    pipeline_run_id TEXT NOT NULL,
+    subject TEXT NOT NULL,         -- what is flowing through (a factor, a candidate…)
+    status TEXT NOT NULL,          -- running | passed | killed | blocked | graduated
+    current_node TEXT,
+    killed_at_node TEXT,
+    kill_reason TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS node_run (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pipeline_run_id TEXT NOT NULL,
+    item_id TEXT,                  -- NULL for join / aggregate_gate nodes
+    node TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    owner TEXT,
+    checker TEXT,
+    verdict TEXT NOT NULL,         -- pass | fail | cannot_evaluate
+    reasons TEXT,
+    duration_ms INTEGER,
+    created_at REAL NOT NULL
+);
+
+-- Artifacts outlive the item that produced them: a killed factor's beta estimate is
+-- still needed downstream (DESIGN.md §5.7.2 rule 4).
+CREATE TABLE IF NOT EXISTS pipeline_artifact (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pipeline_run_id TEXT NOT NULL,
+    item_id TEXT,
+    node TEXT NOT NULL,
+    name TEXT NOT NULL,
+    payload TEXT,
+    created_at REAL NOT NULL
+);
+
+-- Every test ever run, so significance can be corrected for trial count (§5.7.4).
+CREATE TABLE IF NOT EXISTS trial (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pipeline TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    node TEXT NOT NULL,
+    statistic REAL,
+    p_value REAL,
+    epoch TEXT,                    -- universe/cost-model epoch; excluded when superseded
+    created_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_item_run ON pipeline_item(pipeline_run_id);
+CREATE INDEX IF NOT EXISTS idx_noderun_run ON node_run(pipeline_run_id);
+CREATE INDEX IF NOT EXISTS idx_trial_pipeline ON trial(pipeline, created_at);
 CREATE INDEX IF NOT EXISTS idx_chunk_doc ON knowledge_chunk(doc_id);
 CREATE INDEX IF NOT EXISTS idx_doc_source ON knowledge_doc(source_id);
 CREATE INDEX IF NOT EXISTS idx_bt_hypothesis ON backtest_result(hypothesis_id);
@@ -604,6 +667,99 @@ class Storage:
             "SELECT * FROM backtest_result WHERE hypothesis_id=? ORDER BY id",
             (hypothesis_id,),
         ).fetchall()
+
+    # -- pipelines (§5.7) --------------------------------------------------- #
+    def create_pipeline_run(self, run_id: str, pipeline: str) -> None:
+        self.conn.execute(
+            "INSERT INTO pipeline_run(id, pipeline, status, started_at) VALUES(?,?,'running',?)",
+            (run_id, pipeline, _now()))
+        self.conn.commit()
+
+    def finish_pipeline_run(self, run_id: str, status: str, summary: str) -> None:
+        self.conn.execute(
+            "UPDATE pipeline_run SET status=?, finished_at=?, summary=? WHERE id=?",
+            (status, _now(), summary, run_id))
+        self.conn.commit()
+
+    def get_pipeline_run(self, run_id: str) -> Optional[sqlite3.Row]:
+        return self.conn.execute("SELECT * FROM pipeline_run WHERE id=?", (run_id,)).fetchone()
+
+    def list_pipeline_runs(self, limit: int = 20) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM pipeline_run ORDER BY started_at DESC LIMIT ?", (limit,)).fetchall()
+
+    def add_pipeline_item(self, item_id: str, run_id: str, subject: str) -> None:
+        now = _now()
+        self.conn.execute(
+            "INSERT INTO pipeline_item(id, pipeline_run_id, subject, status, current_node,"
+            " killed_at_node, kill_reason, created_at, updated_at)"
+            " VALUES(?,?,?, 'running', NULL, NULL, NULL, ?, ?)",
+            (item_id, run_id, subject, now, now))
+        self.conn.commit()
+
+    def update_pipeline_item(self, item_id: str, **fields: Any) -> None:
+        if not fields:
+            return
+        fields["updated_at"] = _now()
+        cols = ", ".join(f"{k}=?" for k in fields)
+        self.conn.execute(f"UPDATE pipeline_item SET {cols} WHERE id=?",
+                          (*fields.values(), item_id))
+        self.conn.commit()
+
+    def pipeline_items(self, run_id: str) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM pipeline_item WHERE pipeline_run_id=? ORDER BY created_at",
+            (run_id,)).fetchall()
+
+    def add_node_run(self, run_id: str, item_id: Optional[str], node: str, kind: str,
+                     owner: str, checker: str, verdict: str, reasons: str,
+                     duration_ms: int) -> None:
+        self.conn.execute(
+            "INSERT INTO node_run(pipeline_run_id, item_id, node, kind, owner, checker,"
+            " verdict, reasons, duration_ms, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (run_id, item_id, node, kind, owner, checker, verdict, reasons,
+             duration_ms, _now()))
+        self.conn.commit()
+
+    def node_runs(self, run_id: str) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM node_run WHERE pipeline_run_id=? ORDER BY id", (run_id,)).fetchall()
+
+    def add_pipeline_artifact(self, run_id: str, item_id: Optional[str], node: str,
+                              name: str, payload: str) -> None:
+        self.conn.execute(
+            "INSERT INTO pipeline_artifact(pipeline_run_id, item_id, node, name, payload,"
+            " created_at) VALUES(?,?,?,?,?,?)",
+            (run_id, item_id, node, name, payload, _now()))
+        self.conn.commit()
+
+    def pipeline_artifacts(self, run_id: str, name: Optional[str] = None) -> list[sqlite3.Row]:
+        q = "SELECT * FROM pipeline_artifact WHERE pipeline_run_id=?"
+        args: list[Any] = [run_id]
+        if name:
+            q += " AND name=?"
+            args.append(name)
+        return self.conn.execute(q + " ORDER BY id", args).fetchall()
+
+    def add_trial(self, pipeline: str, subject: str, node: str,
+                  statistic: Optional[float], p_value: Optional[float], epoch: str) -> None:
+        self.conn.execute(
+            "INSERT INTO trial(pipeline, subject, node, statistic, p_value, epoch, created_at)"
+            " VALUES(?,?,?,?,?,?,?)",
+            (pipeline, subject, node, statistic, p_value, epoch, _now()))
+        self.conn.commit()
+
+    def trials(self, pipeline: str, since: Optional[float] = None,
+               epoch: Optional[str] = None) -> list[sqlite3.Row]:
+        q = "SELECT * FROM trial WHERE pipeline=?"
+        args: list[Any] = [pipeline]
+        if since is not None:
+            q += " AND created_at >= ?"
+            args.append(since)
+        if epoch is not None:
+            q += " AND epoch = ?"
+            args.append(epoch)
+        return self.conn.execute(q + " ORDER BY created_at", args).fetchall()
 
     # -- topics ------------------------------------------------------------ #
     def upsert_topic(self, name: str, pillar: str = "") -> None:

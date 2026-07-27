@@ -715,6 +715,8 @@ is tombstoned.
 
 | Command | Effect |
 |---|---|
+| `/pipeline` | Recent pipeline runs and what each gate killed (DESIGN.md §5.7) |
+| `/metrics` | Process metrics: cost, failures by node, and the human intervention rate (§5.9) |
 | `/board` · `/board all` | The kanban as text: tasks grouped by status for this topic, or the whole workspace. Same as the **Open board** button on a task card. |
 | Weekly memory consolidation | Runs automatically Sunday 04:00, unattended: merges near-identical lessons and caps growth (DESIGN.md §12 #4). Reported to the activity feed. |
 | `/agents` (or `/help`) | Who is on the team, what each owns, and what escalates — **check this first if an @mention seems to do nothing** |

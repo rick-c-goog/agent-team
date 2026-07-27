@@ -17,6 +17,7 @@ from .agents.registry import Registry, load_agents_from_dir
 from .graph.engine import GraphEngine
 from .knowledge.service import KnowledgeService
 from .memory.service import MemoryService
+from .pipeline import PipelineEngine
 from .programs import Program, Scheduler
 from .quant.hypothesis import HypothesisRegistry
 from .runtime.base import Runtime
@@ -52,6 +53,7 @@ class App:
         # Engine for agents that declare none of their own.
         self.default_engine = (default_engine or "mock").strip().lower()
         self.model = model
+        self._agents_dir = agents_dir      # replay builds a scratch app from this
         self.storage = Storage(db_path)
         self.registry = Registry(self.storage)
         agent_configs = load_agents_from_dir(agents_dir)
@@ -88,6 +90,11 @@ class App:
         self.gateway.attach_engine(self.engine)
         self.gateway.attach_knowledge(self.knowledge)
         self.gateway.attach_hypotheses(self.hypotheses)
+
+        # Pipelines: DAGs of gated runs (§5.7), sharing the gateway's notify hook so a
+        # pipeline is as visible in the workspace as a single task.
+        self.pipelines = PipelineEngine(self.storage, notify=self.gateway.notify)
+        self.gateway.attach_pipelines(self.pipelines)
 
         # Topics come from the agents that own them (plus the always-present catch-all).
         # A workspace with no agents yet has nothing but `general` — which is exactly
@@ -143,6 +150,11 @@ class App:
             self.gateway._post_task_card(task_id, claimable=False)
             return self.gateway._run_task(task_id, agent)
         return run
+
+    def metrics(self, since=None):
+        """Process metrics from the durable record (§5.9)."""
+        from .evaluation import collect
+        return collect(self.storage, since)
 
     def consolidate_memories(self) -> list[dict]:
         reports = self.memory.consolidate_all(self.registry.names())
