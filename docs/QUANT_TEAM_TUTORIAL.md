@@ -28,15 +28,16 @@ it at real market data.
 4. [Meet the desk: the four roles](#4-meet-the-desk-the-four-roles)
 5. [The research loop, step by step](#5-the-research-loop-step-by-step)
 6. [The self-improving part: the hypothesis registry](#6-the-self-improving-part-the-hypothesis-registry)
-7. [Running the desk from Telegram](#7-running-the-desk-from-telegram)
-8. [Cross-market data & backtesting](#8-cross-market-data--backtesting)
-9. [Using real market data](#9-using-real-market-data)
-10. [Using a real LLM for the research prose](#10-using-a-real-llm-for-the-research-prose)
-11. [Tuning the research bar](#11-tuning-the-research-bar)
-12. [Adding a new strategy family](#12-adding-a-new-strategy-family)
-13. [Autonomous research with heartbeats](#13-autonomous-research-with-heartbeats)
-14. [What this design does differently from Vibe-Trading](#14-what-this-design-does-differently-from-vibe-trading)
-15. [Troubleshooting](#15-troubleshooting)
+7. [The selection gate: correcting for how hard you searched](#7-the-selection-gate-correcting-for-how-hard-you-searched)
+8. [Running the desk from Telegram](#8-running-the-desk-from-telegram)
+9. [Cross-market data & backtesting](#9-cross-market-data--backtesting)
+10. [Using real market data](#10-using-real-market-data)
+11. [Using a real LLM for the research prose](#11-using-a-real-llm-for-the-research-prose)
+12. [Tuning the research bar](#12-tuning-the-research-bar)
+13. [Adding a new strategy family](#13-adding-a-new-strategy-family)
+14. [Autonomous research with heartbeats](#14-autonomous-research-with-heartbeats)
+15. [What this design does differently from Vibe-Trading](#15-what-this-design-does-differently-from-vibe-trading)
+16. [Troubleshooting](#16-troubleshooting)
 
 ---
 
@@ -87,13 +88,15 @@ arithmetic is right, not that the strategy is.
 | DAG scheduler blocking downstream on failure | The graph engine's Orchestrator: retry → replan → escalate, with checkpoints | [`graph/engine.py`](../teleraft/graph/engine.py) |
 | Research Autopilot (hypothesis → signal → backtest → refine) | The Anthropic loop: Planner → Builder → Tester → Learn | §5 |
 | Hypothesis Registry with invalidation | `HypothesisRegistry` — blocks re-testing dead ideas | [`quant/hypothesis.py`](../teleraft/quant/hypothesis.py) |
-| Signal-engine code generation + AST sandbox | **Declarative `SignalSpec`** — validated data, never generated code | §14 |
+| Signal-engine code generation + AST sandbox | **Declarative `SignalSpec`** — validated data, never generated code | §15 |
 | Backtest engine, metrics, run cards | `backtest()` + `BacktestResult` + `QuantRuntime.run_card()` | [`quant/backtest.py`](../teleraft/quant/backtest.py) |
-| Cross-market coverage (A-share/HK/US/crypto/FX) | `Market` registry: calendars, costs, settlement, currency per venue | [`quant/markets.py`](../teleraft/quant/markets.py), §8 |
-| Composite backtests mixing markets, shared capital pool | `backtest_portfolio()` with per-symbol attribution and an FX guard | [`quant/portfolio.py`](../teleraft/quant/portfolio.py), §8.3 |
-| `source: auto` per-market provider fallback chains | `LoaderRegistry` — ordered chains, failover, source health | §8.5 |
-| `get_market_data` tool + loader registry | `MarketDataLoader` protocol: synthetic, CSV, or your provider | §9 |
-| Persistent memory across sessions | `MemoryService` + soul amendments | §6 |
+| Cross-market coverage (A-share/HK/US/crypto/FX) | `Market` registry: calendars, costs, settlement, currency per venue | [`quant/markets.py`](../teleraft/quant/markets.py), §9 |
+| Composite backtests mixing markets, shared capital pool | `backtest_portfolio()` with per-symbol attribution and an FX guard | [`quant/portfolio.py`](../teleraft/quant/portfolio.py), §9.3 |
+| `source: auto` per-market provider fallback chains | `LoaderRegistry` — ordered chains, failover, source health | §9.5 |
+| `get_market_data` tool + loader registry | `MarketDataLoader` protocol: synthetic, CSV, or your provider | §10 |
+| Persistent memory across sessions | `MemoryService` + soul amendments, consolidated weekly | §6 |
+| *(not in the source architectures)* | **Selection gate** — corrects significance for how many hypotheses were tested | §7 |
+| Swarm run artifacts and traces | `/pipeline`, `/metrics`, and trace replay for attributing a change | §8, [DESIGN.md §5.9](../DESIGN.md) |
 | 16 IM channel adapters | Telegram is the native surface; Hermes/OpenClaw add the rest | [TELEGRAM_SETUP.md](TELEGRAM_SETUP.md) |
 | Broker connectors, live trading, mandates | **Deliberately out of scope** | §1 |
 
@@ -108,7 +111,14 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-Run the desk:
+Verify the install before trusting anything it prints — the whole quant stack is
+covered, including the no-lookahead and cost-accounting proofs:
+
+```bash
+pytest tests/test_quant.py tests/test_cross_market.py tests/test_evaluation.py
+```
+
+Then run the desk:
 
 ```bash
 python -m teleraft.quant_demo
@@ -159,12 +169,19 @@ The team lives in [`agents/quant/`](../agents/quant/) — one YAML plus one soul
 This is the `quant_desk` + `risk_committee` + `macro_team` preset shape, expressed as
 TeleRaft agents.
 
-| Agent | Seat | Owns | Escalates on |
-|---|---|---|---|
-| **Quinn** | Factor researcher — generates hypotheses, searches parameters | `# research` | live trading, real money, capital allocation |
-| **Bailey** | Backtester/validator — the adversarial reviewer | `# backtest` | live trading, real money |
-| **Robin** | Risk officer (admin role) — owns the limits | `# risk` | leverage, live trading |
-| **Mac** | Macro analyst — regime context, single-regime warnings | `# macro` | live trading |
+| Agent | `role` | Seat | Owns | Escalates on |
+|---|---|---|---|---|
+| **Quinn** | `member` | Factor researcher — generates hypotheses, searches parameters | `# research` | live trading, real money, capital allocation |
+| **Bailey** | **`qa`** | Backtester/validator — the desk's dedicated reviewer | `# research`, `# backtest` | live trading, real money |
+| **Robin** | `admin` | Risk officer — owns the limits | `# risk` | leverage, live trading |
+| **Mac** | `member` | Macro analyst — regime context, single-regime warnings | `# macro` | live trading |
+
+**Bailey's `role: qa` is what routes review to it.** When Quinn builds something, the
+platform picks the Tester in this order: a `qa` agent whose `owns` overlaps the builder's
+→ any `qa` agent → any other agent. Never the builder. Review is a distinct skill, so a
+reviewer whose whole job is to disbelieve accumulates failure patterns instead of
+construction habits — which is why the desk has a dedicated seat rather than rotating the
+duty. A two-agent desk still gets adversarial review through the final fallback.
 
 A representative agent:
 
@@ -314,7 +331,99 @@ can answer "what did we already try, and why did it fail?"
 
 ---
 
-## 7. Running the desk from Telegram
+## 7. The selection gate: correcting for how hard you searched
+
+This is the gate most desks skip, and the one that decides whether a research pipeline
+produces knowledge or expensive noise.
+
+### 7.1 The problem an agent desk makes worse
+
+At a 5% significance threshold, **1 in 20 pure-noise hypotheses passes by construction**.
+That is not a bug in the test — it is what "5% significance" means. A human testing three
+ideas a week absorbs this quietly. An agent desk testing three hundred does not: 10,000
+trials manufacture roughly 500 "significant" discoveries from data with no structure at
+all.
+
+Out-of-sample testing does not save you here, and neither do better statistics. Newey–West
+standard errors and bootstrap resampling correct **one** test for autocorrelation and
+non-normality; they say nothing about the fact that you ran the test ten thousand times.
+
+The intuition: with `n` independent tries, the best t-statistic you should *expect* from
+luck alone grows like `√(2 ln n)`.
+
+```python
+from teleraft.pipeline.selection import expected_max_of_n, deflate
+
+expected_max_of_n(10)      # 1.57  — the bar luck clears after 10 tries
+expected_max_of_n(1000)    # 3.26
+expected_max_of_n(10000)   # 3.86
+
+deflate(2.0, 1)            # +2.00 — a Sharpe of 2 found on the first try
+deflate(2.0, 100)          # -0.53 — the same number after 100 tries is *below* luck
+```
+
+A Sharpe of 2.0 is impressive once. Found on the hundredth attempt, it is what searching
+produces from noise — and the deflated statistic says so.
+
+### 7.2 Why this platform can do it and a stateless swarm cannot
+
+The correction needs one input a stateless system does not have: **how many things you
+tested**. The hypothesis registry (§6) has recorded every trial since the desk started, so
+the count is already there.
+
+> **The trial count is part of the evidence.** A Sharpe ratio reported without the number
+> of hypotheses tested to find it is not a finding. This is the design rule that makes the
+> registry more than an audit log.
+
+### 7.3 Reading the report
+
+Both corrections are reported, because they answer different questions and quoting one
+invites the reader to assume the other:
+
+```python
+from teleraft.pipeline.selection import assess
+
+report = assess(app.storage, "quant-desk", alpha=0.05, window_days=90)
+print(report.summary())
+# 214 trials in the last 90d; ~10.7 false positives expected at α=0.05;
+# 1 survive FDR; best 6.00 → deflated 3.21
+```
+
+| Field | Question it answers |
+|---|---|
+| `expected_false_positives` | How many "discoveries" this much searching produces from nothing |
+| `survivors_fdr` | Of the things called significant, which survive false-discovery-rate control |
+| `best_statistic` → `deflated_statistic` | How impressive the best result is *given* the number of shots taken |
+
+A deflated statistic at or below zero earns an explicit note: *the best result does not
+clear what N trials of pure search would produce — treat it as a null result.*
+
+### 7.4 The window rolls
+
+Counting every hypothesis since inception makes the correction monotonically more
+punishing until the desk can never conclude anything. The ledger therefore uses a
+**rolling window** (90 days by default), which keeps the correction honest about *current*
+search intensity rather than accumulated history:
+
+```python
+assess(storage, "quant-desk", window_days=90)    # what you searched recently
+assess(storage, "quant-desk", epoch="v2")        # exclude a superseded universe/cost model
+```
+
+Trials from a superseded epoch — you changed the universe, or the cost model — are
+excluded by label rather than silently, because the exclusion is itself a research
+decision someone should be able to see.
+
+### 7.5 The test that matters
+
+`tests/test_evaluation.py` asserts the property directly: feed 200 pure-noise trials with
+uniformly distributed p-values, and the desk must produce the ~10 naive "discoveries" that
+α=0.05 guarantees and **zero** after correction. That distinction is the whole difference
+between a research pipeline and a random number generator with good manners.
+
+---
+
+## 8. Running the desk from Telegram
 
 Follow [TELEGRAM_SETUP.md](TELEGRAM_SETUP.md) to create your bots, supergroup, and
 topics, then point the workspace at the quant agents:
@@ -366,28 +475,50 @@ Review** with Approve/Reject buttons. Only Telegram user IDs in `human_ids` can 
 | `/hyp list invalidated` | Only the dead ends, with reasons |
 | `/hyp show <id>` | One hypothesis: all backtests, IS and OOS, plus lineage |
 | `/kb add <uri>` | Add a document to the desk's knowledge base |
+| `/kb list` | Every source, its sync status, and any staleness |
+| `/board` · `/board all` | The kanban as text — this topic, or the whole desk |
+| `/agents` | Who is on the desk, what each owns, what escalates |
+| `/pipeline` | Recent pipeline runs and what each gate killed |
+| `/metrics` | Cost, failures by node, and the human intervention rate |
 
 `/hyp` is read-only by design: hypotheses are created and killed by the research loop,
 never by chat, so the registry stays an honest record of what was actually tested.
 
 ---
 
-## 8. Cross-market data & backtesting
+## 9. Cross-market data & backtesting
 
 A desk that only researches US equities is not a desk. This section covers Vibe-Trading's
 third feature — coverage across A-shares, HK, US, crypto and FX — and it is worth
 understanding *why* it is a correctness feature rather than a breadth feature.
 
-### 8.1 The bug that motivates it
+### 9.1 The bug that motivates it
 
 Sharpe ratios are annualised: `Sharpe = mean_return × periods / (σ × √periods)`. Equities
 trade ~252 days a year; crypto trades 365. Annualise a crypto strategy with 252 and every
 number is wrong by a factor of `√(365/252)` ≈ **1.20**:
 
+To see the effect on its own you have to **hold costs constant**, because venues differ
+in fees too — crypto's 25 bp round trip against US equities' 10 bp would otherwise swamp
+the comparison and tell you nothing about annualisation:
+
 ```python
-crypto = backtest(bars, spec, market="CRYPTO")   # 365/yr → Sharpe 0.0736
-as_equity = backtest(bars, spec, market="US")    # 252/yr → Sharpe 0.0612
+bars = SyntheticLoader().load("BTC-USD")
+spec = SignalSpec("momentum", {"lookback": 60})
+
+crypto    = backtest(bars, spec, market="CRYPTO", commission=0.0, slippage=0.0)
+as_equity = backtest(bars, spec, market="US",     commission=0.0, slippage=0.0)
+
+crypto.sharpe / as_equity.sharpe     # 1.2026  ==  sqrt(365/252) = 1.2035
 ```
+
+Sharpe scales with `√periods`, so the ratio is exactly `√(365/252)` — a **20%
+misstatement** produced silently by a constant. `tests/test_cross_market.py` asserts that
+ratio, so the bug cannot come back.
+
+> Drop the `commission=0.0, slippage=0.0` and the numbers move for a *second* reason:
+> crypto costs more to trade. That is correct behaviour and a bad demonstration — when
+> you want to isolate one convention, hold the others fixed.
 
 That is a ~20% misstatement produced silently, by a constant. The same class of error
 applies to costs (HK stamp duty is ~2× US commission), to shorting (A-share retail
@@ -397,7 +528,7 @@ number that means nothing).
 So the conventions are **data**, in [`quant/markets.py`](../teleraft/quant/markets.py),
 and every result carries the ones that produced it.
 
-### 8.2 The market registry
+### 9.2 The market registry
 
 | Market | Ticker convention | Currency | Periods/yr | Round-trip cost | Shorting |
 |---|---|---|---|---|---|
@@ -434,7 +565,7 @@ sma_cross(fast=20, slow=100) on 600519.SS (CN) [2020-01-01→2025-09-30]:
 > automatically. Saying this precisely matters: a guide that claims T+1 is "handled"
 > without saying when it binds is teaching you to trust the wrong thing.
 
-### 8.3 Portfolio backtests across venues
+### 9.3 Portfolio backtests across venues
 
 Single-symbol research is a toy; the unit a desk decides on is a portfolio. Capital is
 shared across sleeves and each symbol's signal scales its own:
@@ -469,7 +600,7 @@ Three cross-market problems it handles explicitly:
   which compounds — both figures exist so the difference is explicit rather than a
   rounding mystery.
 
-### 8.4 Currencies: refused, not guessed
+### 9.4 Currencies: refused, not guessed
 
 Adding HKD P&L to USD P&L silently is the kind of error that produces a confident,
 meaningless backtest. So it raises:
@@ -495,7 +626,7 @@ p = backtest_portfolio(
 A constant rate is a simplification — real cross-currency P&L needs an FX *series*. The
 constant is honest about being a constant, which is the point.
 
-### 8.5 Provider fallback chains (`source: auto`)
+### 9.5 Provider fallback chains (`source: auto`)
 
 Vibe-Trading routes each market through a chain of providers. `LoaderRegistry` is the
 same idea: try loaders in order, fail over on error, and **never** return an empty series
@@ -522,7 +653,7 @@ on an empty series is worse than no backtest, so that outcome is impossible by
 construction. (Pass `default=[]` to mean "no fallback" — an explicitly empty chain is
 honoured rather than being replaced with synthetic data.)
 
-### 8.6 Asking the desk a cross-market question
+### 9.6 Asking the desk a cross-market question
 
 Mention several tickers and the loop researches them as a portfolio:
 
@@ -555,7 +686,7 @@ card["market_conventions"]["BTC-USD"]["periods_per_year"]   # 365
 card["market_conventions"]["SPY"]["periods_per_year"]       # 252
 ```
 
-### 8.7 What is deliberately not here
+### 9.7 What is deliberately not here
 
 Vibe-Trading covers futures and options with contract specifications, margin, and roll
 logic; it also handles India's T+1 delivery and 18+ providers. This implementation covers
@@ -566,7 +697,7 @@ means adding an instrument model, not a market row.
 
 ---
 
-## 9. Using real market data
+## 10. Using real market data
 
 Synthetic data proves the machinery works; it says nothing about markets. To use real
 prices, implement the loader protocol — it has exactly one method:
@@ -626,7 +757,7 @@ returns that never existed — the single most common way a backtest lies to you
 
 ---
 
-## 10. Using a real LLM for the research prose
+## 11. Using a real LLM for the research prose
 
 `QuantRuntime` is deterministic: it has no model calls, which is why the tests can
 assert on exact Sharpe ratios. That is a feature for the numeric roles and a limitation
@@ -683,7 +814,7 @@ appreciative to say about almost anything; a held-out Sharpe ratio will not.
 
 ---
 
-## 11. Tuning the research bar
+## 12. Tuning the research bar
 
 The thresholds live in one place and are deliberately strict — **most ideas should die**:
 
@@ -713,7 +844,7 @@ feels about right for a research process that is working.
 
 ---
 
-## 12. Adding a new strategy family
+## 13. Adding a new strategy family
 
 Two edits, both in reviewed code — never generated at runtime.
 
@@ -746,7 +877,7 @@ reviewed.
 
 ---
 
-## 13. Autonomous research with heartbeats
+## 14. Autonomous research with heartbeats
 
 Quinn's heartbeat is already declared:
 
@@ -768,7 +899,7 @@ must be one that has not already been killed.
 
 ---
 
-## 14. What this design does differently from Vibe-Trading
+## 15. What this design does differently from Vibe-Trading
 
 Both systems implement the same two features. Three choices here differ, and they are
 worth understanding before you pick one:
@@ -783,7 +914,7 @@ SignalSpec("rm -rf /").validate()                       # ❌ SpecError
 SignalSpec("momentum", {"lookback": "__import__('os')"}) # ❌ SpecError: must be numeric
 ```
 
-You lose expressiveness — a genuinely novel signal needs a code change (§11). You gain
+You lose expressiveness — a genuinely novel signal needs a code change (§12). You gain
 that no research task can execute arbitrary code as a side effect, and every strategy
 ever proposed is diffable, replayable, and comparable.
 
@@ -803,28 +934,28 @@ signature — and you would rather add data providers than remove execution path
 
 ---
 
-## 15. Troubleshooting
+## 16. Troubleshooting
 
 | Symptom | Cause / fix |
 |---|---|
 | Every hypothesis is invalidated | Working as intended on synthetic data. Check `/hyp show <id>` — if in-sample is also poor, the symbol has no signal; if in-sample is strong and OOS is not, that is overfitting caught. |
-| Everything passes | Your bar is too low. Raise `min_sharpe`, enable `beat_benchmark`, increase `oos_fraction` (§10). |
+| Everything passes | Your bar is too low. Raise `min_sharpe`, enable `beat_benchmark`, increase `oos_fraction` (§11). |
 | `no eligible tester` | The desk needs ≥2 agents so nobody grades their own work. Keep at least Quinn and Bailey. |
 | Wrong ticker picked up | Write tickers in caps: `NVDA`, not `nvda`. `_symbol_for` prefers uppercase tokens and defaults to `SPY`. |
-| `SpecError: unknown signal type` | The family is not in `SPEC_TYPES`. Add it deliberately (§11) — this rejection is the safety boundary working. |
-| Results change between runs | They should not: synthetic data is seeded per symbol. If you switched to a live loader, your provider is revising history (or you are using unadjusted closes — §8). |
+| `SpecError: unknown signal type` | The family is not in `SPEC_TYPES`. Add it deliberately (§12) — this rejection is the safety boundary working. |
+| Results change between runs | They should not: synthetic data is seeded per symbol. If you switched to a live loader, your provider is revising history (or you are using unadjusted closes — §9). |
 | Run escalates with "families exhausted" | A negative result, not a bug. No family in the grid found an out-of-sample edge; add a family or change the universe. |
 | A live-trading question stalls at a gate | Also working as intended: `escalate_when` fires before any step runs (§4). |
 | Backtest looks too good | Check turnover and costs. Raise `commission`, and read the note's `📚 Sources` line — every number should trace to a backtest artifact. |
-| `401 invalid x-api-key` during a run | An agent is routed to Claude. The quant desk needs no key — check the startup log for `agent X → claude runtime`, then either set `ANTHROPIC_API_KEY` in **the same environment that runs TeleRaft**, or give that agent `engine: quant` (§10). |
+| `401 invalid x-api-key` during a run | An agent is routed to Claude. The quant desk needs no key — check the startup log for `agent X → claude runtime`, then either set `ANTHROPIC_API_KEY` in **the same environment that runs TeleRaft**, or give that agent `engine: quant` (§11). |
 | `❌ Run failed at the <node> step` in the thread | A node raised. The message carries the cause, and the task returns to *Todo* so you can re-run it once the cause is fixed. |
-| `CurrencyMismatch: portfolio spans [...]` | Working as intended (§8.4). Supply `base_currency` + `fx_rates`, or keep the universe to one currency. |
-| Crypto Sharpe looks different than before | It is now annualised with 365 rather than 252 (§8.1). The old number was wrong by ~20%. |
+| `CurrencyMismatch: portfolio spans [...]` | Working as intended (§9.4). Supply `base_currency` + `fx_rates`, or keep the universe to one currency. |
+| Crypto Sharpe looks different than before | It is now annualised with 365 rather than 252 (§9.1). The old number was wrong by ~20%. |
 | A-share strategy never shorts | Correct: `CN.allows_short = False`, enforced in `backtest()`. Retail A-share shorting is effectively unavailable. |
-| `LookupError: no loader could supply <symbol>` | Every provider in that market's chain failed; the error lists each failure. An empty series is never returned silently (§8.5). |
-| Attribution does not sum to the headline return | It sums to `arithmetic_return`, not the compounded `total_return` (§8.3). Both are reported. |
+| `LookupError: no loader could supply <symbol>` | Every provider in that market's chain failed; the error lists each failure. An empty series is never returned silently (§9.5). |
+| Attribution does not sum to the headline return | It sums to `arithmetic_return`, not the compounded `total_return` (§9.3). Both are reported. |
 | Passing `commission=0` still shows costs | Slippage is a separate market convention. Pass `slippage=0.0` too for a cost-free run. |
-| Futures/options symbols behave like stocks | Out of scope (§8.7) — they need contract multipliers, expiry and margin. Do not use spot backtests for them. |
+| Futures/options symbols behave like stocks | Out of scope (§9.7) — they need contract multipliers, expiry and margin. Do not use spot backtests for them. |
 
 ---
 
