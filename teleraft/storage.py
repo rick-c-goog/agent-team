@@ -8,9 +8,13 @@ a faithful subset of §7 and the access layer would port to Postgres unchanged.
 
 from __future__ import annotations
 
+import logging
+import re
 import sqlite3
 import time
 from typing import Any, Iterable, Optional
+
+log = logging.getLogger("teleraft.storage")
 
 from .models import RunState, TaskStatus
 
@@ -256,6 +260,12 @@ CREATE TABLE IF NOT EXISTS trial (
     created_at REAL NOT NULL
 );
 
+"""
+
+
+# Indexes are created *after* migration: an index on a column that an older
+# database has not gained yet would fail while the tables are being ensured.
+INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_item_run ON pipeline_item(pipeline_run_id);
 CREATE INDEX IF NOT EXISTS idx_noderun_run ON node_run(pipeline_run_id);
 CREATE INDEX IF NOT EXISTS idx_trial_pipeline ON trial(pipeline, created_at);
@@ -269,6 +279,73 @@ def _now() -> float:
     return time.time()
 
 
+# --------------------------------------------------------------------------- #
+# Schema migration
+# --------------------------------------------------------------------------- #
+# `CREATE TABLE IF NOT EXISTS` creates missing *tables* but never adds a column to a
+# table that already exists. So a database created before a column was introduced keeps
+# working until something reads that column, then fails with a bare IndexError far from
+# the cause. Every test uses `:memory:`, which always gets the current schema, so this
+# class of bug is invisible to them — it only ever bites a real, persisted deployment.
+#
+# The fix is to reconcile the live schema against the declared one at startup: for each
+# table, add any declared column that is missing. SQLite's ALTER TABLE ADD COLUMN is
+# cheap and does not rewrite the table.
+_TABLE_RE = re.compile(
+    r"CREATE TABLE IF NOT EXISTS\s+(\w+)\s*\((.*?)\n\);", re.S | re.I)
+
+# Column kinds ALTER TABLE ADD COLUMN cannot express.
+_UNADDABLE = ("primary key", "unique", "references")
+
+
+def _declared_columns(schema: str) -> dict[str, list[tuple[str, str]]]:
+    """{table: [(column, declaration), …]} parsed from the DDL above."""
+    tables: dict[str, list[tuple[str, str]]] = {}
+    for table, body in _TABLE_RE.findall(schema):
+        columns: list[tuple[str, str]] = []
+        for raw in body.split("\n"):
+            line = raw.split("--")[0].strip().rstrip(",").strip()
+            if not line:
+                continue
+            head = line.split()[0].upper()
+            if head in ("CONSTRAINT", "PRIMARY", "UNIQUE", "FOREIGN", "CHECK"):
+                continue                      # table-level constraint, not a column
+            name, _, declaration = line.partition(" ")
+            if name and declaration:
+                columns.append((name, declaration.strip()))
+        tables[table] = columns
+    return tables
+
+
+def migrate(conn) -> list[str]:
+    """Add declared-but-missing columns to existing tables. Returns what changed."""
+    applied: list[str] = []
+    for table, columns in _declared_columns(SCHEMA).items():
+        info = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        if not info:
+            continue                          # brand-new table; the DDL already made it
+        existing = {row[1] for row in info}
+        for name, declaration in columns:
+            if name in existing:
+                continue
+            lowered = declaration.lower()
+            if any(marker in lowered for marker in _UNADDABLE):
+                log.warning(
+                    "cannot add %s.%s automatically (%s) — this needs a hand-written "
+                    "migration", table, name, declaration)
+                continue
+            if "not null" in lowered and "default" not in lowered:
+                # SQLite refuses NOT NULL without a default on a populated table.
+                declaration = declaration + " DEFAULT ''" if "text" in lowered \
+                    else declaration + " DEFAULT 0"
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
+            applied.append(f"{table}.{name}")
+    if applied:
+        conn.commit()
+        log.info("schema migrated: added %s", ", ".join(applied))
+    return applied
+
+
 class Storage:
     """Thin, synchronous data-access layer over SQLite."""
 
@@ -277,6 +354,11 @@ class Storage:
         self.conn = sqlite3.connect(path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
+        self.conn.commit()
+        # Order matters: tables → columns → indexes. An index over a column an older
+        # database has not gained yet would fail if it ran before the migration.
+        self.migrations = migrate(self.conn)
+        self.conn.executescript(INDEXES)
         self.conn.commit()
 
     def close(self) -> None:

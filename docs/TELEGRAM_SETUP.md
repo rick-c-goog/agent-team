@@ -523,6 +523,7 @@ Also read from the environment: `ANTHROPIC_API_KEY` (when `runtime_engine=claude
 | `human_ids is empty` on start | Add your numeric id (`@userinfobot`) to `human_ids`. Without it nobody can approve. |
 | Approve/Reject seems ignored | You're not in `human_ids`. The channel logs `⛔ blocked non-human gate decision`. |
 | `no eligible tester` error | You have only one agent. Add a second so no agent grades its own work. |
+| `IndexError: No item with that key` on startup | An older database missing a column added later. Fixed automatically: startup now reconciles the schema and logs `schema migrated: added …`. If you see this, pull the latest code — no manual step and no data loss. |
 | `LiveTelegramClient needs httpx` | `pip install -e ".[telegram]"`. |
 | `AnthropicRuntime needs the 'anthropic' package` | `pip install -e ".[anthropic]"` and set `ANTHROPIC_API_KEY`. |
 | `PDF support requires pypdf` | `pip install -e ".[knowledge]"`. |
