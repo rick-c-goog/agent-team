@@ -29,15 +29,16 @@ it at real market data.
 5. [The research loop, step by step](#5-the-research-loop-step-by-step)
 6. [The self-improving part: the hypothesis registry](#6-the-self-improving-part-the-hypothesis-registry)
 7. [The selection gate: correcting for how hard you searched](#7-the-selection-gate-correcting-for-how-hard-you-searched)
-8. [Running the desk from Telegram](#8-running-the-desk-from-telegram)
-9. [Cross-market data & backtesting](#9-cross-market-data--backtesting)
-10. [Using real market data](#10-using-real-market-data)
-11. [Using a real LLM for the research prose](#11-using-a-real-llm-for-the-research-prose)
-12. [Tuning the research bar](#12-tuning-the-research-bar)
-13. [Adding a new strategy family](#13-adding-a-new-strategy-family)
-14. [Autonomous research with heartbeats](#14-autonomous-research-with-heartbeats)
-15. [What this design does differently from Vibe-Trading](#15-what-this-design-does-differently-from-vibe-trading)
-16. [Troubleshooting](#16-troubleshooting)
+8. [The eleven-node factor graph](#8-the-eleven-node-factor-graph)
+9. [Running the desk from Telegram](#9-running-the-desk-from-telegram)
+10. [Cross-market data & backtesting](#10-cross-market-data--backtesting)
+11. [Using real market data](#11-using-real-market-data)
+12. [Using a real LLM for the research prose](#12-using-a-real-llm-for-the-research-prose)
+13. [Tuning the research bar](#13-tuning-the-research-bar)
+14. [Adding a new strategy family](#14-adding-a-new-strategy-family)
+15. [Autonomous research with heartbeats](#15-autonomous-research-with-heartbeats)
+16. [What this design does differently from Vibe-Trading](#16-what-this-design-does-differently-from-vibe-trading)
+17. [Troubleshooting](#17-troubleshooting)
 
 ---
 
@@ -95,8 +96,9 @@ arithmetic is right, not that the strategy is.
 | `source: auto` per-market provider fallback chains | `LoaderRegistry` — ordered chains, failover, source health | §9.5 |
 | `get_market_data` tool + loader registry | `MarketDataLoader` protocol: synthetic, CSV, or your provider | §10 |
 | Persistent memory across sessions | `MemoryService` + soul amendments, consolidated weekly | §6 |
+| Eleven-node factor graph (construction → validation → regime → portfolio → attribution) | The pipeline DAG: producers, gates, join, aggregate gate | [`quant/factor_pipeline.py`](../teleraft/quant/factor_pipeline.py), §8 |
 | *(not in the source architectures)* | **Selection gate** — corrects significance for how many hypotheses were tested | §7 |
-| Swarm run artifacts and traces | `/pipeline`, `/metrics`, and trace replay for attributing a change | §8, [DESIGN.md §5.9](../DESIGN.md) |
+| Swarm run artifacts and traces | `/pipeline`, `/metrics`, and trace replay for attributing a change | §9, [DESIGN.md §5.9](../DESIGN.md) |
 | 16 IM channel adapters | Telegram is the native surface; Hermes/OpenClaw add the rest | [TELEGRAM_SETUP.md](TELEGRAM_SETUP.md) |
 | Broker connectors, live trading, mandates | **Deliberately out of scope** | §1 |
 
@@ -423,7 +425,170 @@ between a research pipeline and a random number generator with good manners.
 
 ---
 
-## 8. Running the desk from Telegram
+## 8. The eleven-node factor graph
+
+Sections 5–7 research **one hypothesis at a time**. A factor desk works differently: it
+builds several factors in parallel, gates each independently, combines what survives into
+one portfolio, and asks whether the result is new. That is a DAG, not a loop, and the
+platform's pipeline engine expresses it directly.
+
+```bash
+python -m teleraft.factor_demo
+```
+
+### 8.1 The eleven nodes, and which kind each is
+
+| Node(s) | Kind | Job |
+|---|---|---|
+| **1–7** | `producer` | Construct MKT, SMB, HML, MOM, RMW, CMA, LVOL — in parallel, no gate |
+| **8** | `gate` | **Validator** — Newey–West t, bootstrap, in-sample→out-of-sample degradation |
+| **9** | `gate` | **Regime auditor** — kills anything that works in one regime only |
+| **10** | `join` | **Portfolio constructor** — risk parity over the *survivors*, neutralised |
+| **11** | `aggregate_gate` | **Risk decomposer** — residual alpha against an *independent* benchmark |
+
+The node *kinds* are what make the schedule correct: nodes 8 and 9 run **per factor** so
+MOM can be at node 9 while LVOL is still at node 8; node 10 is a **barrier**, because
+risk-parity weights depend on the covariance of the surviving set and starting early
+gives a different portfolio rather than an earlier one; node 11 judges the **whole**, so
+seven passing factors still do not settle it.
+
+Nodes 1–7 are **one parameterised producer**, not seven near-identical ones — each factor
+still gets its own item, its own gate records, and its own artifact, so the per-factor
+audit trail survives the consolidation.
+
+> **Node 1 emits two things.** The MKT factor, which a gate may kill, *and* a per-stock
+> beta estimate that node 10 needs for beta-neutralisation regardless. Killing a factor
+> must not delete the artifacts it produced.
+
+### 8.2 Four of the seven cannot be built from prices
+
+This is the part a tutorial is tempted to skip, and it is the part that decides whether
+the desk is honest:
+
+| Node | Factor | Needs | Buildable here? |
+|---|---|---|---|
+| 1 | MKT | prices | ✅ rolling regression |
+| 2 | SMB | **shares outstanding** (for market cap) | ⛔ blocked |
+| 3 | HML | **point-in-time book equity** | ⛔ blocked |
+| 4 | MOM | prices | ✅ 12-minus-1-month |
+| 5 | RMW | **point-in-time revenue, COGS, assets** | ⛔ blocked |
+| 6 | CMA | **point-in-time total assets** | ⛔ blocked |
+| 7 | LVOL | prices | ✅ trailing realized vol |
+
+Those four report `cannot_evaluate` and **block**. They are not approximated with a
+proxy, because fundamentals *as currently reported* embed restatements the market never
+had — look-ahead that no downstream gate can detect, since the resulting backtest stays
+internally consistent and is simply wrong.
+
+```
+⛔ HML   blocked  node 3 (Value — high-minus-low book-to-market) needs point-in-time
+                 fundamentals — configure a source that supplies it
+```
+
+Supply the data and they unblock. The message distinguishes *missing data* from *missing
+builder*, so nobody spends an afternoon hunting for a feed they already have.
+
+### 8.3 Node 8 kills with a number
+
+```
+❌ MOM   killed   Newey–West t 0.15 below 2.0 (naive t was 0.15);
+                  bootstrap p 0.896 above 0.05;
+                  in-sample→out-of-sample degradation 100% above 30%
+```
+
+The naive t-statistic is reported alongside the adjusted one so the correction is visible
+rather than asserted. On autocorrelated data the HAC figure is materially smaller — that
+gap *is* the reason the gate exists.
+
+These are **ordinary functions in `teleraft/quant/stats.py`, not model calls.** A
+t-statistic computed by an LLM is strictly worse than one computed by arithmetic. Each is
+tested against a known answer: HAC discounts autocorrelation, the bootstrap separates
+signal from noise, OLS recovers planted coefficients.
+
+### 8.4 Node 9 uses volatility terciles, and says so
+
+A hidden Markov model is the literature's answer. This uses **terciles of trailing
+realized volatility** — crude, transparent, and with no fitting step of its own to
+overfit. Anything concluded from it should say "volatility tercile", not "regime" as if a
+latent state had been identified. Swapping in an HMM later changes one function.
+
+### 8.5 Node 11 is where the concept is easiest to get wrong
+
+Node 10 builds the portfolio as a weighted combination of the surviving factors. If node
+11 then regresses that portfolio on **those same factors**, the regressors span it by
+construction:
+
+```python
+ols(y, [y]).alpha        # 0.0 exactly
+ols(y, [y]).r_squared    # 1.0 exactly
+```
+
+R² → 1 and residual alpha → 0 *as arithmetic*, returning the same answer for a brilliant
+portfolio and a worthless one. So the gate **refuses** that regression:
+
+```
+⛔ benchmark shares ['MKT', 'MOM'] with the constructed factors — the regressors would
+   span the portfolio and residual alpha would be zero by construction, not by finding
+```
+
+Attribution needs **independently constructed** benchmarks — published Fama–French,
+Carhart momentum, betting-against-beta — not your own reconstructions. With none
+configured, node 11 blocks rather than reporting a meaningless zero.
+
+Universe mismatch between your data and a published benchmark is **accepted and
+reported**, not treated as fatal: an exact-universe benchmark is often unobtainable, a
+stated mismatch is honest, and refusing to attribute at all is worse than attributing
+with a caveat.
+
+### 8.6 Be accurate about what this graph is
+
+MKT, SMB, HML, MOM, RMW, CMA and LVOL *are* the Fama–French five plus momentum plus
+betting-against-beta — the canonical **published** factors. A portfolio of known factors
+has, by definition, close to zero alpha relative to those factors.
+
+So this is a **factor replication, portfolio construction and risk attribution system**,
+and a genuinely useful one: it tells you whether your implementation of value matches the
+literature's, how the premia behaved across volatility regimes, and what a neutralised
+risk-parity combination looks like. Calling it *alpha discovery* misdescribes it. Real
+discovery is what happens when node 11's input is a signal **not** in the benchmark set —
+which the graph supports by adding an eighth producer while the benchmark stays external.
+
+### 8.7 Nothing surviving is a result
+
+```
+1/7 survived; 2 killed; 4 blocked
+```
+
+Nodes 8 and 9 applied honestly to real factors will sometimes kill all of them — value
+has endured decade-long droughts, momentum crashes in identifiable regimes. Node 10 then
+reports what killed each rather than producing a portfolio, and a desk that cannot return
+"nothing survived" will eventually be tuned until it never has to.
+
+Every validated factor also lands in the **trial ledger**, so §7's selection gate can
+correct for how many were tested. Seven factors is a mild correction; a desk screening
+hundreds is not.
+
+### 8.8 Tuning the gates
+
+```python
+from teleraft.quant.factor_pipeline import FactorGateConfig, build_factor_pipeline
+
+config = FactorGateConfig(
+    min_tstat=2.0,            # Newey–West adjusted
+    max_p_value=0.05,         # bootstrap
+    max_degradation=0.30,     # in-sample → out-of-sample
+    min_regimes_working=2,    # must work in more than one volatility tercile
+    bootstrap_iterations=10_000,
+    validator="Bailey",       # never the maker (§4)
+)
+pipeline = build_factor_pipeline(universe, benchmark=published, config=config)
+```
+
+`/pipeline` in Telegram shows the last runs and what each gate killed.
+
+---
+
+## 9. Running the desk from Telegram
 
 Follow [TELEGRAM_SETUP.md](TELEGRAM_SETUP.md) to create your bots, supergroup, and
 topics, then point the workspace at the quant agents:
@@ -486,7 +651,7 @@ never by chat, so the registry stays an honest record of what was actually teste
 
 ---
 
-## 9. Cross-market data & backtesting
+## 10. Cross-market data & backtesting
 
 A desk that only researches US equities is not a desk. This section covers Vibe-Trading's
 third feature — coverage across A-shares, HK, US, crypto and FX — and it is worth
@@ -697,7 +862,7 @@ means adding an instrument model, not a market row.
 
 ---
 
-## 10. Using real market data
+## 11. Using real market data
 
 Synthetic data proves the machinery works; it says nothing about markets. To use real
 prices, implement the loader protocol — it has exactly one method:
@@ -757,7 +922,7 @@ returns that never existed — the single most common way a backtest lies to you
 
 ---
 
-## 11. Using a real LLM for the research prose
+## 12. Using a real LLM for the research prose
 
 `QuantRuntime` is deterministic: it has no model calls, which is why the tests can
 assert on exact Sharpe ratios. That is a feature for the numeric roles and a limitation
@@ -814,7 +979,7 @@ appreciative to say about almost anything; a held-out Sharpe ratio will not.
 
 ---
 
-## 12. Tuning the research bar
+## 13. Tuning the research bar
 
 The thresholds live in one place and are deliberately strict — **most ideas should die**:
 
@@ -844,7 +1009,7 @@ feels about right for a research process that is working.
 
 ---
 
-## 13. Adding a new strategy family
+## 14. Adding a new strategy family
 
 Two edits, both in reviewed code — never generated at runtime.
 
@@ -877,7 +1042,7 @@ reviewed.
 
 ---
 
-## 14. Autonomous research with heartbeats
+## 15. Autonomous research with heartbeats
 
 Quinn's heartbeat is already declared:
 
@@ -899,7 +1064,7 @@ must be one that has not already been killed.
 
 ---
 
-## 15. What this design does differently from Vibe-Trading
+## 16. What this design does differently from Vibe-Trading
 
 Both systems implement the same two features. Three choices here differ, and they are
 worth understanding before you pick one:
@@ -934,7 +1099,7 @@ signature — and you would rather add data providers than remove execution path
 
 ---
 
-## 16. Troubleshooting
+## 17. Troubleshooting
 
 | Symptom | Cause / fix |
 |---|---|

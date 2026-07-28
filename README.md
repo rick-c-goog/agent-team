@@ -35,6 +35,9 @@ python -m teleraft.demo
 # Watch a quant research desk catch its own overfitting:
 python -m teleraft.quant_demo
 
+# Run the eleven-node factor graph (producers → gates → join → attribution):
+python -m teleraft.factor_demo
+
 # Run the tests:
 pytest
 ```
@@ -53,6 +56,12 @@ Research spans US, HK, China A-share, crypto and FX, each with its own calendar,
 settlement and currency — so a crypto Sharpe is annualised with 365 rather than 252, an
 A-share strategy cannot short, and a portfolio mixing HKD with USD is **refused** unless
 you supply FX rates rather than being silently summed.
+
+The eleven-node factor graph is built on the same pipeline engine: seven factor
+producers, a validator and regime gate per factor, a risk-parity join over the
+survivors, and an attribution gate that **refuses** to regress a portfolio against the
+factors it was built from. Four of the seven factors block for want of point-in-time
+fundamentals rather than being approximated.
 
 It is research tooling only: no broker connectors, no order placement, and every note
 waits for a human to tap Approve.
