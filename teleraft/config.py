@@ -44,6 +44,11 @@ class Config:
     # --- LLM runtime -----------------------------------------------------------
     runtime_engine: str = "mock"     # "mock" | "claude"
     model: str = "claude-fable-5"
+    # --- market data for the quant desk ---------------------------------------
+    data_source: str = "synthetic"     # synthetic | csv | yfinance
+    data_start: str = "2015-01-01"
+    data_end: str = ""
+    price_cache: str = ".cache/prices"
     # --- knowledge base (§4.1) -------------------------------------------------
     knowledge_root: str = "."        # allow-listed root for `file` sources
     sync_knowledge_on_start: bool = True
@@ -108,6 +113,12 @@ def load_config(path: str | os.PathLike = "teleraft.toml") -> Config:
         cfg.runtime_engine = app.get("runtime_engine", cfg.runtime_engine)
         cfg.model = app.get("model", cfg.model)
 
+        md = data.get("market_data", {})
+        cfg.data_source = str(md.get("source", cfg.data_source)).strip().lower()
+        cfg.data_start = md.get("start", cfg.data_start)
+        cfg.data_end = md.get("end", cfg.data_end)
+        cfg.price_cache = md.get("cache", cfg.price_cache)
+
         kb = data.get("knowledge", {})
         cfg.knowledge_root = kb.get("root", cfg.knowledge_root)
         cfg.sync_knowledge_on_start = bool(kb.get("sync_on_start", cfg.sync_knowledge_on_start))
@@ -133,6 +144,13 @@ def load_config(path: str | os.PathLike = "teleraft.toml") -> Config:
     cfg.host_gateway_url = env.get("TELERAFT_HOST_GATEWAY_URL", cfg.host_gateway_url)
     cfg.host_api_key = env.get("TELERAFT_HOST_API_KEY", cfg.host_api_key)
     cfg.bot_mode = env.get("TELERAFT_BOT_MODE", cfg.bot_mode).strip().lower()
+    cfg.data_source = env.get("TELERAFT_DATA_SOURCE", cfg.data_source).strip().lower()
+    cfg.data_start = env.get("TELERAFT_DATA_START", cfg.data_start)
+    cfg.price_cache = env.get("TELERAFT_PRICE_CACHE", cfg.price_cache)
+
+    if cfg.data_source not in ("synthetic", "csv", "yfinance"):
+        raise ValueError(
+            f"data_source must be synthetic, csv or yfinance — got {cfg.data_source!r}")
 
     if cfg.bot_mode not in ("puppet", "per_agent"):
         raise ValueError(

@@ -12,11 +12,15 @@ Two scenarios run: one where an edge survives, and one where nothing does. The s
 is the more important one — a research desk that never returns a negative result is
 broken.
 
-No API keys, no network, no orders. Research drafts only, approved by a human.
+No API keys, no network, no orders by default. Research drafts only, approved by a
+human. ``--source yfinance`` runs the same loop over real adjusted closes; the
+out-of-sample gate is unchanged, and far more ideas die.
 """
 
 from __future__ import annotations
 
+import argparse
+import logging
 from pathlib import Path
 
 from .app import App
@@ -30,13 +34,28 @@ RULE = "-" * 78
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="TeleRaft quant desk demo")
+    parser.add_argument("--source", default="synthetic",
+                        choices=["synthetic", "yfinance", "csv"],
+                        help="price source (default: synthetic, offline)")
+    args = parser.parse_args()
+    logging.basicConfig(level=logging.WARNING, format="  ⚠ %(message)s")
+
     print("=" * 78)
     print("TeleRaft quant desk — Planner → Orchestrator → Builder → Tester on real numbers")
     print("=" * 78)
 
-    app = App(human_ids={HUMAN}, agents_dir=QUANT_AGENTS)
+    loader = None
+    if args.source != "synthetic":
+        from .quant.providers import build_loader
+        loader = build_loader(args.source)
+
+    app = App(human_ids={HUMAN}, agents_dir=QUANT_AGENTS, market_loader=loader)
     print("\nDesk:", ", ".join(app.registry.names()))
-    print("Data: synthetic, deterministic, offline — swap in a live loader per §8\n")
+    from .runtime.quant import QuantRuntime
+    from .quant.hypothesis import HypothesisRegistry
+    print("Data:", QuantRuntime(HypothesisRegistry(app.storage), loader).data_provenance())
+    print()
 
     # ================================================================== #
     print(RULE)

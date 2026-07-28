@@ -133,6 +133,10 @@ class QuantRuntime:
         if name == "synthetic":
             return ("synthetic (deterministic pseudo-prices — NOT real market data; "
                     "results prove the machinery works, nothing about markets)")
+        if name == "yfinance":
+            # Real prices, but two caveats a reviewer must see on the card itself.
+            return ("yfinance (adjusted closes; currently-listed symbols only, so a "
+                    "universe of today's tickers is survivorship-biased)")
         return f"{name}"
 
     def _bars(self, symbol: str) -> Bars:

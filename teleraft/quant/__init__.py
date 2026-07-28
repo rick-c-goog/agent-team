@@ -33,6 +33,7 @@ from .data import (
 from .hypothesis import Hypothesis, HypothesisRegistry, HypothesisStatus
 from .markets import MARKETS, Market, market_for, resolve_market
 from .portfolio import CurrencyMismatch, PortfolioResult, backtest_portfolio
+from .providers import ProviderError, YFinanceLoader, build_loader
 
 __all__ = [
     "Bars",
@@ -47,6 +48,9 @@ __all__ = [
     "Market",
     "MarketDataLoader",
     "PortfolioResult",
+    "ProviderError",
+    "YFinanceLoader",
+    "build_loader",
     "SPEC_TYPES",
     "SignalSpec",
     "SyntheticLoader",

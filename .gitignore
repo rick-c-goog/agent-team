@@ -7,4 +7,5 @@ __pycache__/
 *.sqlite3
 teleraft_data/
 teleraft.toml
+.cache/
 .DS_Store

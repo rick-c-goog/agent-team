@@ -57,6 +57,16 @@ model = "claude-fable-5"
 root = "."
 sync_on_start = true
 
+# --- Market data for the quant desk (QUANT_TEAM_TUTORIAL.md §11) ---
+# Only used by agents with `engine: quant`. "synthetic" needs nothing and proves the
+# machinery; "yfinance" needs `pip install -e ".[yfinance]"` and gives real adjusted
+# closes over a survivorship-biased universe — the caveat is stamped on every artifact.
+[market_data]
+source = "synthetic"        # "synthetic" (default, offline) | "csv" | "yfinance"
+start  = "2015-01-01"
+# end  = ""                 # blank = through today
+cache  = ".cache/prices"    # downloads are cached here; delete to force a refresh
+
 # --- Onboarding entry point (DESIGN.md §3.3) ---
 # The host that carries the onboarding interview and fires agent heartbeats.
 [onboarding]
@@ -76,3 +86,6 @@ host = "hermes"             # "hermes" (default, best scheduler) | "openclaw" | 
 #   export TELERAFT_HOST_GATEWAY_URL=http://127.0.0.1:8787
 #   export TELERAFT_HOST_API_KEY=...                 # Hermes / OpenClaw gateway key
 #   export GOOGLE_DRIVE_ACCESS_TOKEN=ya29...         # read-only scope, for gdrive sources
+#   export TELERAFT_DATA_SOURCE=yfinance             # quant desk price source
+#   export TELERAFT_DATA_START=2015-01-01
+#   export TELERAFT_PRICE_CACHE=.cache/prices

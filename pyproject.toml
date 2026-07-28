@@ -13,6 +13,7 @@ dependencies = [
 anthropic = ["anthropic>=0.40"]
 telegram = ["httpx>=0.27"]          # also required by web/Drive knowledge fetchers
 knowledge = ["pypdf>=4.0"]          # .pdf extraction with page-number citations
+yfinance = ["yfinance>=0.2"]        # real daily adjusted closes (quant desk)
 dev = ["pytest>=8.0", "httpx>=0.27", "pypdf>=4.0"]
 
 [project.scripts]

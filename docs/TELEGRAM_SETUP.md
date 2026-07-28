@@ -495,6 +495,21 @@ and graph don't change. (Remember: you can't use `getUpdates` and a webhook at o
 | per-source `sensitive: true` | Pins that source to **local** embedding — its text is never sent to a hosted provider (DESIGN.md §12 #7). |
 | `sync_on_start` | Ingest declared sources at startup (default `true`). |
 
+`[market_data]` — the quant desk's price source (QUANT_TEAM_TUTORIAL.md §11). Ignored
+unless an agent declares `engine: quant`:
+
+| Key | Meaning |
+|---|---|
+| `source` (`TELERAFT_DATA_SOURCE`) | `synthetic` (default, offline, not real markets), `csv`, or `yfinance`. |
+| `start` (`TELERAFT_DATA_START`) | First bar to fetch (default `2015-01-01`). |
+| `end` | Last bar; blank means through today. |
+| `cache` (`TELERAFT_PRICE_CACHE`) | Download cache directory (default `.cache/prices`). |
+
+`yfinance` requires `pip install -e ".[yfinance]"`; the import is checked at startup, so
+a missing package fails immediately rather than mid-research. Real prices carry a
+survivorship caveat that is printed on every artifact — read §11.3 of the quant tutorial
+before acting on any result.
+
 `[onboarding]` (§18):
 
 | Key | Meaning |

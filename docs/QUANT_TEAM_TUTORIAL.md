@@ -92,8 +92,9 @@ arithmetic is right, not that the strategy is.
 | Signal-engine code generation + AST sandbox | **Declarative `SignalSpec`** — validated data, never generated code | §15 |
 | Backtest engine, metrics, run cards | `backtest()` + `BacktestResult` + `QuantRuntime.run_card()` | [`quant/backtest.py`](../teleraft/quant/backtest.py) |
 | Cross-market coverage (A-share/HK/US/crypto/FX) | `Market` registry: calendars, costs, settlement, currency per venue | [`quant/markets.py`](../teleraft/quant/markets.py), §9 |
-| Composite backtests mixing markets, shared capital pool | `backtest_portfolio()` with per-symbol attribution and an FX guard | [`quant/portfolio.py`](../teleraft/quant/portfolio.py), §9.3 |
-| `source: auto` per-market provider fallback chains | `LoaderRegistry` — ordered chains, failover, source health | §9.5 |
+| Composite backtests mixing markets, shared capital pool | `backtest_portfolio()` with per-symbol attribution and an FX guard | [`quant/portfolio.py`](../teleraft/quant/portfolio.py), §10.3 |
+| `source: auto` per-market provider fallback chains | `LoaderRegistry` — ordered chains, failover, source health | §10.5 |
+| Live market data | `YFinanceLoader` — adjusted closes, disk cache, survivorship warning stamped on every artifact | [`quant/providers.py`](../teleraft/quant/providers.py), §11 |
 | `get_market_data` tool + loader registry | `MarketDataLoader` protocol: synthetic, CSV, or your provider | §10 |
 | Persistent memory across sessions | `MemoryService` + soul amendments, consolidated weekly | §6 |
 | Eleven-node factor graph (construction → validation → regime → portfolio → attribution) | The pipeline DAG: producers, gates, join, aggregate gate | [`quant/factor_pipeline.py`](../teleraft/quant/factor_pipeline.py), §8 |
@@ -162,6 +163,14 @@ fails out-of-sample:
 
 Notice the in-sample vs out-of-sample columns: `momentum` looked *positive* in-sample
 (+0.03) and was **-1.09** out-of-sample. That gap is what the desk exists to catch.
+
+Everything above ran on synthetic prices, offline. For real ones:
+
+```bash
+pip install -e ".[yfinance]" && python -m teleraft.quant_demo --source yfinance
+```
+
+Same loop, same gates, real adjusted closes — see §11.
 
 ---
 
@@ -657,7 +666,7 @@ A desk that only researches US equities is not a desk. This section covers Vibe-
 third feature — coverage across A-shares, HK, US, crypto and FX — and it is worth
 understanding *why* it is a correctness feature rather than a breadth feature.
 
-### 9.1 The bug that motivates it
+### 10.1 The bug that motivates it
 
 Sharpe ratios are annualised: `Sharpe = mean_return × periods / (σ × √periods)`. Equities
 trade ~252 days a year; crypto trades 365. Annualise a crypto strategy with 252 and every
@@ -693,7 +702,7 @@ number that means nothing).
 So the conventions are **data**, in [`quant/markets.py`](../teleraft/quant/markets.py),
 and every result carries the ones that produced it.
 
-### 9.2 The market registry
+### 10.2 The market registry
 
 | Market | Ticker convention | Currency | Periods/yr | Round-trip cost | Shorting |
 |---|---|---|---|---|---|
@@ -730,7 +739,7 @@ sma_cross(fast=20, slow=100) on 600519.SS (CN) [2020-01-01→2025-09-30]:
 > automatically. Saying this precisely matters: a guide that claims T+1 is "handled"
 > without saying when it binds is teaching you to trust the wrong thing.
 
-### 9.3 Portfolio backtests across venues
+### 10.3 Portfolio backtests across venues
 
 Single-symbol research is a toy; the unit a desk decides on is a portfolio. Capital is
 shared across sleeves and each symbol's signal scales its own:
@@ -765,7 +774,7 @@ Three cross-market problems it handles explicitly:
   which compounds — both figures exist so the difference is explicit rather than a
   rounding mystery.
 
-### 9.4 Currencies: refused, not guessed
+### 10.4 Currencies: refused, not guessed
 
 Adding HKD P&L to USD P&L silently is the kind of error that produces a confident,
 meaningless backtest. So it raises:
@@ -791,7 +800,7 @@ p = backtest_portfolio(
 A constant rate is a simplification — real cross-currency P&L needs an FX *series*. The
 constant is honest about being a constant, which is the point.
 
-### 9.5 Provider fallback chains (`source: auto`)
+### 10.5 Provider fallback chains (`source: auto`)
 
 Vibe-Trading routes each market through a chain of providers. `LoaderRegistry` is the
 same idea: try loaders in order, fail over on error, and **never** return an empty series
@@ -818,7 +827,7 @@ on an empty series is worse than no backtest, so that outcome is impossible by
 construction. (Pass `default=[]` to mean "no fallback" — an explicitly empty chain is
 honoured rather than being replaced with synthetic data.)
 
-### 9.6 Asking the desk a cross-market question
+### 10.6 Asking the desk a cross-market question
 
 Mention several tickers and the loop researches them as a portfolio:
 
@@ -851,7 +860,7 @@ card["market_conventions"]["BTC-USD"]["periods_per_year"]   # 365
 card["market_conventions"]["SPY"]["periods_per_year"]       # 252
 ```
 
-### 9.7 What is deliberately not here
+### 10.7 What is deliberately not here
 
 Vibe-Trading covers futures and options with contract specifications, margin, and roll
 logic; it also handles India's T+1 delivery and 18+ providers. This implementation covers
@@ -864,8 +873,168 @@ means adding an instrument model, not a market row.
 
 ## 11. Using real market data
 
-Synthetic data proves the machinery works; it says nothing about markets. To use real
-prices, implement the loader protocol — it has exactly one method:
+Synthetic data proves the machinery works; it says nothing about markets. Real prices
+ship in the box — `yfinance` is wired through config, both demos, and the runtime.
+
+### 11.1 Turn it on
+
+```bash
+pip install -e ".[yfinance]"
+```
+
+Then run either demo against real adjusted closes:
+
+```bash
+python -m teleraft.factor_demo --source yfinance
+```
+
+```bash
+python -m teleraft.quant_demo --source yfinance
+```
+
+For the live Telegram desk, set it in `teleraft.toml`:
+
+```toml
+[market_data]
+source = "yfinance"        # synthetic | csv | yfinance
+start  = "2015-01-01"
+cache  = ".cache/prices"
+```
+
+or by environment variable:
+
+```bash
+export TELERAFT_DATA_SOURCE=yfinance
+```
+
+The app resolves the loader at startup and imports `yfinance` immediately, so a missing
+package fails while you are still watching the console — not three minutes later, after
+a human has been told their question is being researched.
+
+### 11.2 What changes when the data is real
+
+Nothing in the loop. The same seven producers, the same validator, the same regime
+auditor, the same attribution gate. Only two things differ: the provenance line on every
+artifact, and how many ideas survive.
+
+Here is the eleven-node graph on twelve large-cap US names, the same command as §8:
+
+```
+Universe: 12 symbols · yfinance adjusted closes · REAL prices · survivorship-biased universe
+
+  built: LVOL, MKT, MOM
+  blocked: CMA, HML, RMW, SMB — four of seven need data a price feed cannot give
+
+  ✅ MKT   passed
+  ❌ MOM   killed   Newey–West t 0.06 below 2.0 (naive t was 0.06); bootstrap p 0.957 above 0.05
+  ❌ LVOL  killed   in-sample→out-of-sample degradation 100% above 30%
+  ⛔ SMB HML RMW CMA  blocked: need fundamentals a price feed cannot give
+
+  1/7 survived; 2 killed; 4 blocked
+```
+
+Read the momentum line carefully, because it is the whole point of the exercise.
+A cross-sectional momentum spread over twelve mega-caps has a t-statistic of **0.06** and
+a bootstrap p-value of **0.957**. There is nothing there, and the gate says so without
+being asked to. On synthetic data the same node passes. That difference is not a bug in
+either run — it is the gate doing its job on data that has no edge in it.
+
+Node 11 is just as blunt about the survivor:
+
+```
+  → residual alpha t 1.11 below 2.0 — the portfolio is explained by known
+    factors (R² 0.31); this is repackaged style, not new alpha
+```
+
+Your numbers will differ from these — the series grows every day, so the window is not
+the one that produced the output above. The *shape* of the answer is what to expect:
+most things die.
+
+### 11.3 The four things that decide whether real-data results mean anything
+
+**Adjusted closes.** The loader always passes `auto_adjust=True`. A raw close series
+turns AAPL's 4-for-1 split on 2020-08-31 into a −75% day, manufacturing a return that
+never happened. This is the most common way a backtest on free data lies to you, and it
+is completely silent. There is a live test pinning it (§11.5): that day reads +3.4%.
+
+**Survivorship.** Yahoo serves *currently listed* symbols. Any universe you assemble
+from today's tickers has already dropped the companies that failed, which inflates every
+backtest run over it. The loader cannot fix this — no free price feed can. It warns once
+per process and stamps the caveat onto the provenance line of every artifact:
+
+```
+yfinance (adjusted closes; currently-listed symbols only, so a universe of
+today's tickers is survivorship-biased)
+```
+
+That line is on the card the human approves. If you intend to act on a result, you need
+a point-in-time universe, which means a paid vendor (CRSP, Compustat, Sharadar).
+
+**Caching.** Every download is written to `.cache/prices` keyed by symbol and date range,
+so a parameter sweep re-reads a file instead of re-hitting Yahoo. This matters more than
+it sounds: `yfinance` is an unofficial scraper of a free endpoint and it rate-limits. It
+also keeps a research run reproducible if the upstream series is later revised. Delete
+the directory to force a refresh.
+
+**Fundamentals are still missing.** Four of the seven factors — SMB, HML, RMW, CMA —
+need point-in-time shares outstanding and balance-sheet data. A price feed cannot supply
+them, so those nodes stay `blocked`, not `killed`. §8.4 explains why that distinction is
+load-bearing: blocked means "not evaluated", and reporting it as a failure would be a
+lie in the other direction.
+
+### 11.4 Ticker conventions and failures
+
+Yahoo uses suffixes: `0700.HK`, `7203.T`, `BTC-USD`, `EURUSD=X`, `^GSPC`. Get one wrong
+and you get an empty frame rather than an error, so the loader raises instead:
+
+```
+yfinance returned no data for 'NOT_A_TICKER' between 2015-01-01 and today.
+Check the ticker (Yahoo uses suffixes such as '0700.HK', 'BTC-USD', 'EURUSD=X'),
+or the symbol may be delisted.
+```
+
+A series shorter than 60 bars is refused for the same reason — a gate handed eight bars
+will compute a confident statistic from nothing.
+
+For a universe, one bad ticker does not abort the run:
+
+```python
+from teleraft.quant.providers import YFinanceLoader
+
+loader = YFinanceLoader(start="2018-01-01")
+universe, failed = loader.load_universe(["AAPL", "MSFT", "TYPO"])
+# universe: {"AAPL": Bars, "MSFT": Bars}   failed: {"TYPO": "yfinance returned no data…"}
+```
+
+The producers need to know which names they actually got — a factor built from a
+silently smaller universe is a different factor.
+
+### 11.5 Verifying it yourself
+
+The default test suite is offline and deterministic; the provider tests drive a fake
+`yfinance` module so they never touch the network. Two tests do hit Yahoo, and they are
+opt-in:
+
+```bash
+TELERAFT_LIVE_DATA=1 pytest tests/test_providers.py -k live
+```
+
+One asserts that AAPL's 2020 split is adjusted away; the other loads eight real symbols
+and runs the full eleven-node graph over them. Run these after a `yfinance` upgrade —
+the library changes its response shape between releases, and that is exactly the kind of
+break a fake frame cannot catch.
+
+### 11.6 Other sources
+
+`CsvLoader` reads `data/SPY.csv` with a `date,open,high,low,close,volume` header:
+
+```toml
+[market_data]
+source = "csv"
+```
+
+Any other provider (CCXT for crypto, Tushare for China A-shares, a paid vendor) is the
+same one-method protocol:
 
 ```python
 class MarketDataLoader(Protocol):
@@ -873,52 +1042,9 @@ class MarketDataLoader(Protocol):
     def load(self, symbol: str, start: str, end: str) -> Bars: ...
 ```
 
-### Option A — CSV you already have
-
-```bash
-mkdir -p data
-# data/SPY.csv → date,open,high,low,close,volume
-```
-
-```python
-from teleraft.quant.data import CsvLoader
-loader = CsvLoader("data")
-```
-
-### Option B — a live provider (yfinance shown; CCXT, Tushare, Alpha Vantage are the same shape)
-
-```python
-# my_loaders.py
-from teleraft.quant.data import Bars
-
-class YFinanceLoader:
-    name = "yfinance"
-
-    def load(self, symbol: str, start: str = "", end: str = "") -> Bars:
-        import yfinance as yf                       # pip install yfinance
-        df = yf.download(symbol, start=start or "2015-01-01", end=end or None,
-                         progress=False, auto_adjust=True)
-        return Bars(
-            symbol=symbol,
-            dates=[d.strftime("%Y-%m-%d") for d in df.index],
-            closes=[float(c) for c in df["Close"]],
-        )
-```
-
-Wire it in when you build the app:
-
-```python
-from teleraft.app import App
-from teleraft.runtime.quant import QuantRuntime
-from my_loaders import YFinanceLoader
-
-app = App(human_ids={"11111111"}, agents_dir="agents/quant")
-quant = QuantRuntime(app.hypotheses, loader=YFinanceLoader())
-app.engine.runtime_for = lambda agent: quant
-```
-
-**Use adjusted closes.** Splits and dividends in a raw close series will manufacture
-returns that never existed — the single most common way a backtest lies to you.
+Write that one method, pass the instance as `App(market_loader=...)`, and every backtest,
+factor and gate in the system uses it unchanged. Use `LoaderRegistry` (§10.5) to route
+different markets to different providers in one desk.
 
 ---
 
@@ -1114,13 +1240,19 @@ signature — and you would rather add data providers than remove execution path
 | Backtest looks too good | Check turnover and costs. Raise `commission`, and read the note's `📚 Sources` line — every number should trace to a backtest artifact. |
 | `401 invalid x-api-key` during a run | An agent is routed to Claude. The quant desk needs no key — check the startup log for `agent X → claude runtime`, then either set `ANTHROPIC_API_KEY` in **the same environment that runs TeleRaft**, or give that agent `engine: quant` (§11). |
 | `❌ Run failed at the <node> step` in the thread | A node raised. The message carries the cause, and the task returns to *Todo* so you can re-run it once the cause is fixed. |
-| `CurrencyMismatch: portfolio spans [...]` | Working as intended (§9.4). Supply `base_currency` + `fx_rates`, or keep the universe to one currency. |
-| Crypto Sharpe looks different than before | It is now annualised with 365 rather than 252 (§9.1). The old number was wrong by ~20%. |
+| `CurrencyMismatch: portfolio spans [...]` | Working as intended (§10.4). Supply `base_currency` + `fx_rates`, or keep the universe to one currency. |
+| Crypto Sharpe looks different than before | It is now annualised with 365 rather than 252 (§10.1). The old number was wrong by ~20%. |
 | A-share strategy never shorts | Correct: `CN.allows_short = False`, enforced in `backtest()`. Retail A-share shorting is effectively unavailable. |
-| `LookupError: no loader could supply <symbol>` | Every provider in that market's chain failed; the error lists each failure. An empty series is never returned silently (§9.5). |
-| Attribution does not sum to the headline return | It sums to `arithmetic_return`, not the compounded `total_return` (§9.3). Both are reported. |
+| `LookupError: no loader could supply <symbol>` | Every provider in that market's chain failed; the error lists each failure. An empty series is never returned silently (§10.5). |
+| Attribution does not sum to the headline return | It sums to `arithmetic_return`, not the compounded `total_return` (§10.3). Both are reported. |
 | Passing `commission=0` still shows costs | Slippage is a separate market convention. Pass `slippage=0.0` too for a cost-free run. |
-| Futures/options symbols behave like stocks | Out of scope (§9.7) — they need contract multipliers, expiry and margin. Do not use spot backtests for them. |
+| Futures/options symbols behave like stocks | Out of scope (§10.7) — they need contract multipliers, expiry and margin. Do not use spot backtests for them. |
+| `yfinance is not installed` | `pip install -e ".[yfinance]"`, or run with `--source synthetic`. |
+| `yfinance returned no data for 'X'` | Wrong ticker. Yahoo uses suffixes: `0700.HK`, `7203.T`, `BTC-USD`, `EURUSD=X`, `^GSPC` (§11.4). |
+| `X returned only N bars — too short to conclude` | Widen `start`, or drop the symbol. Under 60 bars the gates would compute confident statistics from noise. |
+| Real-data run is slow the first time, fast after | Working as intended — downloads are cached in `.cache/prices` (§11.3). Delete that directory to refresh. |
+| Every factor dies on real data | Usually correct. A momentum spread over twelve mega-caps really does have t ≈ 0 (§11.2). Check the provenance line before assuming a bug. |
+| `only N symbols loaded — need at least 6` | The cross-sectional factors need a real cross-section. Check network/tickers, or use `--source synthetic`. |
 
 ---
 

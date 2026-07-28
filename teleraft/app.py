@@ -49,6 +49,7 @@ class App:
         group_chat_id: str = "",
         default_engine: str = "mock",
         model: str = "",
+        market_loader=None,
     ):
         # Engine for agents that declare none of their own.
         self.default_engine = (default_engine or "mock").strip().lower()
@@ -66,6 +67,9 @@ class App:
 
         # Quant research services (used when an agent declares `engine: quant`).
         self.hypotheses = HypothesisRegistry(self.storage)
+        # None → QuantRuntime falls back to synthetic prices. A real loader (yfinance,
+        # csv) is injected here so every quant agent shares one cache.
+        self.market_loader = market_loader
 
         # One runtime per agent, chosen by the agent's declared engine. Default is the
         # deterministic mock; `engine: quant` gets the backtest-driven QuantRuntime.
@@ -187,7 +191,7 @@ class App:
             if engine in cache:
                 return cache[engine]
             if engine == "quant":
-                runtime: Runtime = QuantRuntime(self.hypotheses)
+                runtime: Runtime = QuantRuntime(self.hypotheses, self.market_loader)
             elif engine in ("claude", "claude-agent-sdk", "anthropic"):
                 from .runtime.anthropic_runtime import AnthropicRuntime
                 runtime = AnthropicRuntime(model=self.model) if self.model \

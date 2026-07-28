@@ -3,11 +3,16 @@
 Nodes 1–7 construct factors in parallel; 8 validates; 9 audits regimes; 10 combines the
 survivors; 11 asks whether anything is left after known factors are removed.
 
-Runs offline on deterministic synthetic prices. What you see is the machinery working —
-not a claim about markets.
+Defaults to deterministic synthetic prices, offline: what you see is the machinery
+working, not a claim about markets. Pass ``--source yfinance`` to run the identical
+graph over real adjusted closes — the gates do not change, only the data does, and a
+real universe is where most factors start dying for real reasons.
 """
 
 from __future__ import annotations
+
+import argparse
+import logging
 
 from .pipeline import PipelineEngine
 from .pipeline.selection import assess
@@ -19,18 +24,58 @@ from .storage import Storage
 UNIVERSE = ["AAA", "BBB", "CCC", "DDD", "EEE", "FFF",
             "GGG", "HHH", "III", "JJJ", "KKK", "LLL"]
 BENCHMARK_UNIVERSE = ["ZZ1", "ZZ2", "ZZ3", "ZZ4", "ZZ5", "ZZ6", "ZZ7", "ZZ8", "ZZ9"]
+
+# Real tickers for --source yfinance. Large, liquid, long-listed: the point is to
+# exercise the graph on real data, not to propose this as a research universe. It is
+# survivorship-biased by construction — every name here is one that survived.
+REAL_UNIVERSE = ["AAPL", "MSFT", "JNJ", "XOM", "JPM", "PG",
+                 "KO", "WMT", "CVX", "MRK", "PEP", "CSCO"]
+REAL_BENCHMARK = ["IBM", "INTC", "T", "VZ", "GE", "F", "MMM", "CAT", "BA"]
 RULE = "-" * 78
 MARK = {"passed": "✅", "killed": "❌", "blocked": "⛔"}
 
 
+def _load(source: str) -> tuple[dict, dict, str]:
+    """Return (universe, benchmark universe, provenance line).
+
+    Node 11 regresses against a benchmark built from *different* symbols — an
+    overlapping benchmark would explain the alpha with itself.
+    """
+    if source == "synthetic":
+        loader = SyntheticLoader()
+        return ({s: loader.load(s) for s in UNIVERSE},
+                {s: loader.load(s) for s in BENCHMARK_UNIVERSE},
+                "synthetic prices (NOT real market data)")
+
+    from .quant.providers import build_loader
+
+    loader = build_loader(source)
+    universe, failed = loader.load_universe(REAL_UNIVERSE)
+    benchmark, _ = loader.load_universe(REAL_BENCHMARK)
+    if failed:
+        print("  skipped " + ", ".join(f"{k} ({v[:40]}…)" for k, v in failed.items()))
+    if len(universe) < 6:
+        raise SystemExit(
+            f"only {len(universe)} symbols loaded — the cross-sectional factors need at "
+            "least 6. Check your network, or run with --source synthetic.")
+    return (universe, benchmark,
+            f"{source} adjusted closes · REAL prices · survivorship-biased universe")
+
+
 def main() -> None:
-    loader = SyntheticLoader()
-    universe = {s: loader.load(s) for s in UNIVERSE}
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--source", default="synthetic",
+                        choices=["synthetic", "yfinance", "csv"],
+                        help="price source (default: synthetic, offline)")
+    args = parser.parse_args()
+    logging.basicConfig(level=logging.WARNING, format="  ⚠ %(message)s")
+
+    universe, benchmark_universe, provenance = _load(args.source)
 
     print("=" * 78)
     print("The eleven-node factor graph")
     print("=" * 78)
-    print(f"\nUniverse: {len(universe)} symbols · synthetic prices (NOT real market data)")
+    print(f"\nUniverse: {len(universe)} symbols · {provenance}")
 
     print("\n" + RULE)
     print("NODES 1–7 · factor construction (one parameterised producer)\n")
@@ -61,7 +106,7 @@ def main() -> None:
     # ---------------------------------------------------------------- #
     print("\n" + RULE)
     print("RUN 2 · with an INDEPENDENT benchmark, gates relaxed to reach node 11\n")
-    bench_built, _ = construct({s: loader.load(s) for s in BENCHMARK_UNIVERSE})
+    bench_built, _ = construct(benchmark_universe)
     benchmark = {f"BM_{k}": v.returns for k, v in bench_built.items()}
     print(f"  benchmark series (built from different symbols): {', '.join(benchmark)}")
 

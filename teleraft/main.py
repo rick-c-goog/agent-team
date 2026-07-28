@@ -42,6 +42,31 @@ def check_engine_prerequisites(engines: dict[str, str]) -> list[str]:
     return problems
 
 
+def _build_market_loader(cfg):
+    """Resolve the configured price source, failing at startup rather than mid-run.
+
+    A quant desk that discovers at task time that `yfinance` is missing has already
+    told a human it was working on their question.
+    """
+    from .quant.providers import build_loader
+
+    if cfg.data_source == "synthetic":
+        return None                       # QuantRuntime's own default
+    if cfg.data_source == "yfinance":
+        loader = build_loader("yfinance", start=cfg.data_start, end=cfg.data_end,
+                              cache_dir=cfg.price_cache)
+        try:
+            loader._module()              # import now, not on the first research task
+        except Exception as e:
+            raise SystemExit(f"market data: {e}")
+        logging.info("market data: yfinance, from %s, cache %s — REAL prices, "
+                     "survivorship-biased universe", cfg.data_start, cfg.price_cache)
+        return loader
+    loader = build_loader(cfg.data_source, root=cfg.knowledge_root)
+    logging.info("market data: %s", cfg.data_source)
+    return loader
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     cfg = load_config()
@@ -73,6 +98,7 @@ def main() -> None:
     # No `runtime_for` override: each agent's own `runtime.engine` decides, with
     # cfg.runtime_engine as the fallback for agents that declare none. Overriding it
     # here would route a deterministic quant desk through Claude.
+    market_loader = _build_market_loader(cfg)
     app = App(
         db_path=cfg.db_path,
         agents_dir=cfg.agents_dir,
@@ -83,6 +109,7 @@ def main() -> None:
         group_chat_id=cfg.group_chat_id,
         default_engine=cfg.runtime_engine,
         model=cfg.model,
+        market_loader=market_loader,
     )
 
     from .agents.registry import load_agents_from_dir
