@@ -42,6 +42,10 @@ python -m teleraft.factor_demo
 pytest
 ```
 
+The demos above use synthetic prices, so they need no keys and no network. For real
+market data, `pip install -e ".[yfinance]"` and add `--source yfinance` to either quant
+demo — same loop, same gates, real adjusted closes.
+
 ## Example: an AI quant research desk
 
 [docs/QUANT_TEAM_TUTORIAL.md](docs/QUANT_TEAM_TUTORIAL.md) builds a four-agent quant
@@ -62,6 +66,11 @@ producers, a validator and regime gate per factor, a risk-parity join over the
 survivors, and an attribution gate that **refuses** to regress a portfolio against the
 factors it was built from. Four of the seven factors block for want of point-in-time
 fundamentals rather than being approximated.
+
+Prices come from a one-method loader, so the desk runs on synthetic data offline or on
+real adjusted closes via `yfinance` with no other change. The provenance line on every
+artifact names which — including the survivorship caveat that free price feeds cannot
+fix — so a reviewer never has to guess whether a number came from a market.
 
 It is research tooling only: no broker connectors, no order placement, and every note
 waits for a human to tap Approve.

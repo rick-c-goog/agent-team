@@ -95,6 +95,16 @@ class GraphEngine:
         self.knowledge = knowledge
         self.knowledge_k = knowledge_k
 
+    def _provenance(self, agent: str) -> str:
+        """What data this agent's runtime works from, if it works from data at all.
+
+        A negative result is only meaningful alongside its source: "no edge found" on
+        synthetic prices says nothing about markets, and the human reading the escalation
+        cannot tell the two cases apart otherwise.
+        """
+        describe = getattr(self.runtime_for(agent), "data_provenance", None)
+        return describe() if callable(describe) else ""
+
     # ------------------------------------------------------------------ #
     # Public API
     # ------------------------------------------------------------------ #
@@ -215,7 +225,9 @@ class GraphEngine:
     def _node_orchestrate(self, run_id: str, state: RunState) -> str:
         """The Orchestrator: pick the next step, retry, replan, or send to review."""
         if state.tokens_used > state.budget.token_cap:
-            self.notify("escalate", run_id=run_id, task_id=state.task_id, reason="token budget exceeded")
+            self.notify("escalate", run_id=run_id, task_id=state.task_id,
+                        reason="token budget exceeded",
+                        provenance=self._provenance(state.agent))
             raise Interrupt(run_id, Gate.REVIEW, state.task_id,
                             {"reason": "token budget exceeded", "artifact": state.latest_artifact})
 
@@ -285,7 +297,8 @@ class GraphEngine:
         if verdict.terminal:
             # The Tester says no retry can succeed — escalate rather than burn budget.
             reason = "; ".join(verdict.reasons) or "tester marked the result terminal"
-            self.notify("escalate", run_id=run_id, task_id=state.task_id, reason=reason)
+            self.notify("escalate", run_id=run_id, task_id=state.task_id, reason=reason,
+                        provenance=self._provenance(state.agent))
             raise Interrupt(run_id, Gate.REVIEW, state.task_id,
                             {"reason": reason, "artifact": state.latest_artifact})
 
@@ -299,7 +312,8 @@ class GraphEngine:
         state.replans += 1
         if state.replans > state.budget.max_replans:
             self.notify("escalate", run_id=run_id, task_id=state.task_id,
-                        reason="replan budget exhausted")
+                        reason="replan budget exhausted",
+                        provenance=self._provenance(state.agent))
             raise Interrupt(run_id, Gate.REVIEW, state.task_id,
                             {"reason": "replan budget exhausted", "artifact": state.latest_artifact})
         # Re-plan with accumulated verdicts as context; reset per-step retry counters.

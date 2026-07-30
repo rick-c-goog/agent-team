@@ -643,10 +643,13 @@ class Gateway:
             f"❌ Run failed on #{esc(task_id)} at {esc(node)}: {esc(first_line)}")
         self._refresh_task_card(task_id)
 
-    def _notify_escalate(self, run_id, task_id, reason):
+    def _notify_escalate(self, run_id, task_id, reason, provenance=""):
         task = self.storage.get_task(task_id)
-        self.client.send_message(self.group_chat_id, f"🚨 Escalation: {esc(reason)}",
-                                 thread=self._thread(task))
+        text = f"🚨 Escalation: {esc(reason)}"
+        # A negative result needs its data source as much as a positive one does.
+        if provenance:
+            text += f"\nData: {esc(provenance)}"
+        self.client.send_message(self.group_chat_id, text, thread=self._thread(task))
         self.client.send_channel(f"🚨 Escalation on #{esc(task_id)}: {esc(reason)}")
 
     def _notify_done(self, task, run_id, agent, lessons):

@@ -1492,8 +1492,11 @@ These limits are part of the design, not advice layered on top:
   (synthesize the input, pass the gate) destroys the only thing the pipeline is for.
 - **Trial count is reported with every result** (§5.7.4). A Sharpe ratio without the
   number of hypotheses tested to find it is not a finding.
-- **Synthetic data is labelled as such everywhere it appears**, because plausible numbers
-  from pseudo-prices are exactly the kind of output that gets quoted out of context.
+- **Every artifact names its data source and that source's known biases.** Synthetic data
+  is labelled as such, because plausible numbers from pseudo-prices are exactly the kind
+  of output that gets quoted out of context. Real data carries the caveats the feed cannot
+  fix — a free price provider serves currently-listed symbols, so its provenance line says
+  "survivorship-biased" on the card the human approves, not only in the documentation.
 - **The system is not a licensed adviser** and its output is not investment advice; that
   statement belongs on the artifacts themselves, not only in the documentation.
 
@@ -1677,9 +1680,16 @@ Two rules follow:
   failures. The universe must be as-of the rebalance date, delistings included, with the
   delisting return applied.
 
-Our current implementation is price-only (§ the quant tutorial). Nodes 3, 5 and 6 are
-therefore **not buildable** until a point-in-time fundamentals source is configured, and
-the design's answer is that they report `cannot_evaluate` and block rather than
-approximating with what is available.
+Our current implementation is price-only (§ the quant tutorial). Real daily adjusted
+closes ship — `yfinance`, selectable in config — but a price feed is precisely the thing
+that cannot supply fundamentals. Nodes 3, 5 and 6 are therefore **not buildable** until a
+point-in-time fundamentals source is configured, and the design's answer is that they
+report `cannot_evaluate` and block rather than approximating with what is available.
+
+The survivorship rule above is the one the shipped loader can only *partially* honour: it
+cannot reconstruct a point-in-time universe from a free feed, so instead of failing closed
+it warns and stamps the bias onto every artifact's provenance line. That is the honest
+position for a research tool — the alternative, staying silent, would let a survivorship-
+inflated backtest read exactly like a clean one.
 
 

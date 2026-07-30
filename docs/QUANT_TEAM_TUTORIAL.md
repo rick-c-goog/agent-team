@@ -158,11 +158,16 @@ fails out-of-sample:
 🔧 Quinn: Candidate: vol_target(lookback=60, target_vol=0.1) on NVDA
 ❌ Bailey rejected: ...; All 4 strategy families tried on NVDA — no out-of-sample
    edge found; this is a negative result, not a failure
-🚨 Escalation → a human is asked, nothing is shipped
+🚨 Escalation: ...no out-of-sample edge found; this is a negative result, not a failure
+Data: synthetic (deterministic pseudo-prices — NOT real market data; ...)
 ```
 
 Notice the in-sample vs out-of-sample columns: `momentum` looked *positive* in-sample
 (+0.03) and was **-1.09** out-of-sample. That gap is what the desk exists to catch.
+
+Notice also that the escalation carries a `Data:` line. A negative result needs its
+source as much as a positive one: "no edge found" on pseudo-prices says nothing about
+markets, and without that line the two cases read identically.
 
 Everything above ran on synthetic prices, offline. For real ones:
 
@@ -445,6 +450,10 @@ platform's pipeline engine expresses it directly.
 python -m teleraft.factor_demo
 ```
 
+That runs on synthetic prices. Add `--source yfinance` for the same graph over real
+adjusted closes (§11) — worth doing once you have read this section, because the real run
+kills more and is the more instructive output.
+
 ### 8.1 The eleven nodes, and which kind each is
 
 | Node(s) | Kind | Job |
@@ -490,9 +499,13 @@ had — look-ahead that no downstream gate can detect, since the resulting backt
 internally consistent and is simply wrong.
 
 ```
-⛔ HML   blocked  node 3 (Value — high-minus-low book-to-market) needs point-in-time
-                 fundamentals — configure a source that supplies it
+⛔ HML   blocked  cannot evaluate: node 3 (Value — high-minus-low book-to-market) needs
+                 point-in-time fundamentals — configure a source that supplies it
 ```
+
+`cannot_evaluate` is a distinct outcome from `killed`, not a politer wording of it. A
+killed factor was measured and failed; a blocked one was never measured. Collapsing the
+two would let a missing data feed masquerade as a research finding.
 
 Supply the data and they unblock. The message distinguishes *missing data* from *missing
 builder*, so nobody spends an afternoon hunting for a feed they already have.

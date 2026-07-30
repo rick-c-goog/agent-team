@@ -6,6 +6,7 @@ validation and error paths all run — the parts that actually break in producti
 
 import math
 import os
+from datetime import date, timedelta
 
 import pytest
 
@@ -61,8 +62,22 @@ class _FakeYF:
 
 
 def _frame(n=300, start=100.0):
-    dates = [f"2024-{1 + i // 28:02d}-{1 + i % 28:02d}" for i in range(n)]
-    closes = [start * (1.001 ** i) for i in range(n)]
+    """A plausible daily series: real weekday dates and a deterministic random walk.
+
+    Both details matter. Naive month/day arithmetic overflows into impossible dates like
+    `2024-23-14` past ~336 bars, and a fixture that emits those could hide a genuine
+    date-handling bug. A pure exponential ramp has no volatility, so anything asserting
+    on a Sharpe ratio would see ~85 and look fine while proving nothing.
+    """
+    day = date(2020, 1, 1)
+    dates, closes, price, seed = [], [], start, 12345
+    while len(dates) < n:
+        if day.weekday() < 5:                      # skip weekends, like a real feed
+            seed = (1103515245 * seed + 12345) % (2 ** 31)     # deterministic LCG
+            price *= 1.0 + ((seed / 2 ** 31) - 0.49) * 0.02
+            dates.append(day.isoformat())
+            closes.append(price)
+        day += timedelta(days=1)
     return _Frame(dates, closes)
 
 
@@ -81,7 +96,7 @@ def test_a_frame_becomes_bars_with_iso_dates(tmp_path):
     bars = YFinanceLoader(yf=_FakeYF(_frame()), cache_dir=str(tmp_path)).load("SPY")
     assert isinstance(bars, Bars) and bars.symbol == "SPY"
     assert len(bars) == 300
-    assert bars.dates[0] == "2024-01-01"
+    assert bars.dates[0] == "2020-01-01"
     assert all(isinstance(c, float) and c > 0 for c in bars.closes)
 
 
@@ -370,3 +385,52 @@ def test_no_loader_falls_back_to_synthetic(tmp_path):
     agents = str(Path(__file__).resolve().parent.parent / "agents" / "quant")
     app = App(agents_dir=agents, human_ids={"1"}, sync_knowledge=False)
     assert "NOT real market data" in app._runtime_for("Quinn").data_provenance()
+
+
+def _desk_run(loader, tmp_path):
+    """Drive one real research task and return every message the desk emitted."""
+    from pathlib import Path
+
+    from teleraft.app import App
+    from teleraft.telegram.gateway import Update
+
+    agents = str(Path(__file__).resolve().parent.parent / "agents" / "quant")
+    app = App(human_ids={"11111111"}, agents_dir=agents, market_loader=loader,
+              sync_knowledge=False)
+    app.gateway.handle_message(
+        Update(text="@Quinn is there a momentum edge on SPY", user_id="11111111",
+               user_handle="rick", topic="# research", as_task=True,
+               mentions=["Quinn"]))
+    messages = [m.text for m in app.client.messages.values()]
+    app.close()
+    return messages
+
+
+def test_the_survivorship_caveat_reaches_what_the_human_reads(tmp_path):
+    """DESIGN.md §11.1 claims the bias is stamped on the artifact, not just logged.
+
+    A warning in a server log is invisible to the person deciding what to do. The claim
+    has to hold on whichever message the desk ends on — the review card when an edge
+    survives, the escalation when nothing does. On a realistic random walk it is usually
+    the escalation, which is exactly the case a provenance line is easiest to forget.
+    """
+    loader = YFinanceLoader(yf=_FakeYF(_frame(900)), cache_dir=str(tmp_path))
+    messages = _desk_run(loader, tmp_path)
+
+    verdicts = [m for m in messages if "In Review" in m or "Escalation" in m]
+    assert verdicts, "the desk ended without a review card or an escalation"
+    assert any("yfinance" in m and "survivorship" in m for m in verdicts), (
+        "no verdict message named the data source and its bias:\n"
+        + "\n--\n".join(verdicts))
+    assert not any("NOT real market data" in m for m in verdicts), \
+        "real data must not be labelled synthetic"
+
+
+def test_a_negative_result_on_synthetic_data_says_so(tmp_path):
+    """The inverse case: 'no edge found' on pseudo-prices must not read as a market fact."""
+    messages = _desk_run(None, tmp_path)
+    verdicts = [m for m in messages if "In Review" in m or "Escalation" in m]
+    assert verdicts
+    assert any("NOT real market data" in m for m in verdicts), (
+        "a synthetic-data verdict did not disclose that it is not real market data:\n"
+        + "\n--\n".join(verdicts))
